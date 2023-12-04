@@ -157,7 +157,8 @@ def b():
         console.print("[yellow]Bugscanner-go is not installed. Installing now...[/yellow]")
         subprocess.run(['pkg', 'update', '&&', 'pkg', 'upgrade', '-y'])
         subprocess.run(['pkg', 'install', 'golang',])
-        subprocess.run(['go', 'install', '-v', 'github.com/aztecrabbit/bugscanner-go@latest'])
+        subprocess.run(['echo', 'PATH="$PATH:$HOME/go/bin"', '>>', '$HOME/.bashrc', '&&', 'source', '$HOME/.bashrc'])
+        subprocess.run(['go', 'install', '-v', 'github.com/aztecrabbit/bugscanner-go@latest']) 
         console.print("[green]Bugscanner-go installed successfully![/green]")
 
 def bugscanner_subdomain_scan():
