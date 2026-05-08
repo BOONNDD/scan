@@ -441,6 +441,18 @@
   // ── Ghost Execution: pre-serialized packet cache (LEVEL-ZERO OVERRIDE) ─
   let _ghostExecPacket = null;  // { signal, packet, builtAt }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // § V13 — PRE-CANDLE INJECTION ENGINE
+  // ══════════════════════════════════════════════════════════════════════
+  const _phantomProcessed  = new Set();  // "asset:candleStartMs" — prevents double-fire
+  let   _phantomSkipUntil  = 0;          // timestamp: skip injection until accuracy recovers
+  let   _phantomWeight     = 1.0;        // confidence multiplier [0.5 – 1.5]
+  let   _phantomPendingKey = null;       // key of the candle whose prediction is in-flight
+  let   _phantomPredicted  = null;       // predicted close price for accuracy check
+  let   _phantomTriggerTs  = 0;          // when the phantom was fired (for delta logging)
+  let   _phantomTradeFlag  = false;      // true while executeTrade is called from phantom path
+  let   _lastTradeWasPhantom = false;    // persists after executeTrade for learning discount
+
   let _readySignal    = null;
   let _readySignalTs  = 0;
   let lastTradeTime   = 0;
@@ -1569,12 +1581,14 @@
       if (!snap) return;
 
       // ── Regime stats update ──────────────────────────────────────────────
+      // V13: phantom trades count as 0.8 in regime winRate (20% discount)
+      // to prevent phantom-signal overfitting. Full weight updates still apply.
       const regime = snap.regime || ps.regime || 'RANGE';
       const rs = ps.regimeStats[regime];
       if (rs) {
-        rs.total++;
-        if (won) rs.wins++;
-        // Block regime if WR < 45% after minimum sample
+        const tradeWeight = _lastTradeWasPhantom ? 0.8 : 1.0;
+        rs.total += tradeWeight;
+        if (won) rs.wins += tradeWeight;
         if (rs.total >= CFG.SUPREME_REGIME_MIN_TRADES) {
           ps.regimeBlocked[regime] = (rs.wins / rs.total) < CFG.SUPREME_REGIME_BLOCK_WR;
         }
@@ -2066,6 +2080,21 @@
       // 🔴 PRED-BAR: أعلى أولوية — يُشغَّل أول شيء على كل تيك قبل أي تحليل آخر
       _predBarTick(a, price, now);
       updateLivePrice(price); renderCandleRow(); resetTickCandleTimer(a);
+
+      // ── V13: Pre-Candle Injection — inject phantom when 15-20% of candle remains ─
+      if (now > _phantomSkipUntil) {
+        const _pcc = currentCandles[a];
+        if (_pcc && _pcc.prices.length >= 5 && candlePeriod > 0) {
+          const _elapsed  = now - _pcc.startTime;
+          const _total    = candlePeriod * 1000;
+          const _pct      = _elapsed / _total;
+          // inject window: 80–90% through the candle (15–20% time remaining)
+          if (_pct >= 0.80 && _pct < 0.92) {
+            const _predicted = predictClosePrice(_pcc.prices, 5);
+            injectPhantomCandle(a, _predicted, now);
+          }
+        }
+      }
       if (!_sCandle.isActive()) _sCandle.init(price, now); else _sCandle.update(price);
       updateTickSize(a, price);
 
@@ -2217,6 +2246,29 @@
   function closeCurrentCandle(asset) {
     const cc = currentCandles[asset];
     if (!cc || cc.prices.length < CFG.MIN_TICKS_PER_CANDLE) { currentCandles[asset]=null; return; }
+
+    // ── V13: measure phantom prediction accuracy before building real candle ─
+    const _phantomKey = asset + ':' + cc.startTime;
+    if (_phantomPendingKey === _phantomKey && _phantomPredicted !== null) {
+      const realClose = cc.prices[cc.prices.length - 1];
+      const err = Math.abs(realClose - _phantomPredicted) / (realClose || 1);
+      const deltaMs = Date.now() - _phantomTriggerTs;
+      console.log('[V13 Phantom] err=' + (err * 100).toFixed(4) +
+        '% | predicted=' + _phantomPredicted.toFixed(5) +
+        ' actual=' + realClose.toFixed(5) +
+        ' | phantom→close delta=' + deltaMs + 'ms');
+      if (err < 0.0001) {
+        _phantomWeight = Math.min(1.5, _phantomWeight + 0.05);
+      } else if (err > 0.0005) {
+        _phantomWeight    = Math.max(0.5, _phantomWeight - 0.10);
+        // skip phantom injection for next 5 candles
+        _phantomSkipUntil = Date.now() + (candlePeriod || 5) * 5000;
+        addLog('👻 точность штраф — skip 5 свечей | w=' + _phantomWeight.toFixed(2), 'info');
+      }
+      _phantomPendingKey = null;
+      _phantomPredicted  = null;
+    }
+
     const candle = buildCandle(cc.prices, cc.startTime);
     if (!candle) { currentCandles[asset]=null; return; }
     if (!candleBuffers[asset]) candleBuffers[asset] = [];
@@ -2235,10 +2287,92 @@
         'تيكات:'+candle.tickCount+' | جسم:'+candle.bodySize.toFixed(5)+' | '+trendInfo.label+' | شموع:'+bufs.length
       );
       renderCandleRow();
-      // ── CR15: أطلق عكس الشمعة فوراً بعد الإغلاق ──────────────────
-      _cr15Fire(candle, asset);
+      // ── V13: CR15 only fires on real close if phantom didn't already handle it ─
+      if (!_phantomProcessed.has(_phantomKey)) _cr15Fire(candle, asset);
+      // cleanup phantom key after real candle commits
+      _phantomProcessed.delete(_phantomKey);
     }
     currentCandles[asset] = null;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § V13 — predictClosePrice: weighted linear regression on last N ticks
+  // ══════════════════════════════════════════════════════════════════════
+  // Weight[i] = i+1 so recent ticks dominate. Returns predicted next price.
+  function predictClosePrice(prices, n) {
+    n = n || 5;
+    const len = prices.length;
+    if (len < 2) return prices[len - 1] || 0;
+    const sl = prices.slice(-n);
+    const m  = sl.length;
+    let sw=0, swx=0, swy=0, swx2=0, swxy=0;
+    for (let i = 0; i < m; i++) {
+      const w = i + 1;
+      sw   += w;
+      swx  += w * i;
+      swy  += w * sl[i];
+      swx2 += w * i * i;
+      swxy += w * i * sl[i];
+    }
+    const det = sw * swx2 - swx * swx;
+    if (Math.abs(det) < 1e-14) return sl[m - 1];
+    const slope = (sw * swxy - swx * swy) / det;
+    const intercept = (swy - slope * swx) / sw;
+    return intercept + slope * m;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § V13 — injectPhantomCandle
+  // Called when 15-20% of candle time remains and we have >= 5 ticks.
+  // Builds a synthetic candle from current ticks + predicted close,
+  // feeds it to CR15 and re-runs _predBarTick with the predicted price.
+  // ══════════════════════════════════════════════════════════════════════
+  function injectPhantomCandle(asset, predictedClose, now) {
+    if (now < _phantomSkipUntil) return;
+    const cc = currentCandles[asset];
+    if (!cc || cc.prices.length < CFG.MIN_TICKS_PER_CANDLE) return;
+
+    const key = asset + ':' + cc.startTime;
+    if (_phantomProcessed.has(key)) return;   // already injected this candle
+
+    const phantomPrices = cc.prices.concat(predictedClose);
+    const phantom = buildCandle(phantomPrices, cc.startTime);
+    if (!phantom) return;
+
+    phantom.isPhantom   = true;
+    phantom.phantomConf = _phantomWeight;
+
+    _phantomProcessed.add(key);
+    _phantomPendingKey = key;
+    _phantomPredicted  = predictedClose;
+    _phantomTriggerTs  = now;
+
+    addLog(
+      '👻 phantom ' + (phantom.isBullish ? '↑' : '↓') +
+      ' → ' + predictedClose.toFixed(5) +
+      ' | w=' + _phantomWeight.toFixed(2),
+      'phantom'
+    );
+    _flashPhantomUI(phantom.isBullish, predictedClose);
+
+    // ── run CR15 on phantom candle ──────────────────────────────────────
+    _cr15Fire(phantom, asset);
+
+    // ── re-run SUPREME-PRED with predicted price for Ghost pre-build ────
+    _phantomTradeFlag = true;
+    try { _predBarTick(asset, predictedClose, now); } catch(_) {}
+    _phantomTradeFlag = false;
+  }
+
+  // ── V13 UI: purple flash when phantom fires ───────────────────────────
+  function _flashPhantomUI(isBullish, price) {
+    try {
+      let el = W.document.getElementById('pb-phantom-flash');
+      if (!el) return;
+      el.textContent = (isBullish ? '👻↑ ' : '👻↓ ') + price.toFixed(5);
+      el.className   = 'pb-phantom-active';
+      setTimeout(() => { if (el) el.className = ''; }, 700);
+    } catch(_) {}
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -2872,8 +3006,11 @@
     }
     _readySignal = null; // ✅ v10.8: امسح الإشارة بعد التنفيذ — يمنع Signal Watcher من إعادة الإطلاق
 
-    // ✅ v10.8: lockMs تكيفي — getAdaptiveCooldown() يعمل على أي فريم
-    const lockMs = getAdaptiveCooldown();
+    // ✅ v10.8: lockMs تكيفي + V13: phantom trades get reduced cooldown
+    _lastTradeWasPhantom = _phantomTradeFlag;
+    const lockMs = _phantomTradeFlag
+      ? Math.max(200, Math.round((candlePeriod || 5) * 1000 * 0.05))
+      : getAdaptiveCooldown();
     // ✅ v10.10 FIX#1: ألغِ الـ timers القديمة قبل تسجيل الجديدة — يمنع auto-reset القديم من تصفير tradeExec للصفقة الجديدة
     if (_tradeExecLockTimer)  { clearTimeout(_tradeExecLockTimer);  _tradeExecLockTimer  = null; }
     if (_tradeExecResetTimer) { clearTimeout(_tradeExecResetTimer); _tradeExecResetTimer = null; }
@@ -5019,6 +5156,24 @@
     #pb-arrow-up.pba-fire { color:#00ff88; opacity:1;    animation:pb-arr-up-fire 0.45s ease-in-out infinite; }
     #pb-arrow-dn.pba-soft { color:rgba(255,55,85,0.75);  opacity:0.85; animation:pb-arr-dn-soft 1.1s ease-in-out infinite; }
     #pb-arrow-dn.pba-fire { color:#ff6680; opacity:1;    animation:pb-arr-dn-fire 0.45s ease-in-out infinite; }
+
+    /* ── V13: Phantom Flash indicator ── */
+    #pb-phantom-flash {
+      display:inline-block; font-size:11px; font-weight:700;
+      color:transparent; letter-spacing:0.5px;
+      pointer-events:none; transition:color 0.08s;
+    }
+    #pb-phantom-flash.pb-phantom-active {
+      color:#cc44ff;
+      text-shadow:0 0 10px #cc44ff, 0 0 22px #8800ff, 0 0 38px #cc88ff;
+      animation:pb-phantom-pulse 0.7s ease-out forwards;
+    }
+    @keyframes pb-phantom-pulse {
+      0%   { transform:scale(1.5); opacity:1; }
+      60%  { transform:scale(1.1); opacity:0.9; }
+      100% { transform:scale(1.0); opacity:0; }
+    }
+
     @keyframes cb-btn-glow-buy  {
       0%  { box-shadow: 0 0 0 0 rgba(0,210,100,0.9), inset 0 0 0 0 rgba(0,210,100,0.2); transform: scale(1); }
       30% { box-shadow: 0 0 20px 6px rgba(0,210,100,0.7), inset 0 0 12px 0 rgba(0,210,100,0.3); transform: scale(1.04); }
@@ -5181,9 +5336,10 @@
         <div id="pb-arrows">
           <span id="pb-arrow-up">▲</span>
           <span id="pb-arrow-dn">▼</span>
+          <span id="pb-phantom-flash"></span>
         </div>
         <div id="pb-header">
-          <span id="pb-title">🔥 SUPREME-PRED v2 V12</span>
+          <span id="pb-title">🔥 SUPREME-PRED v2 V13</span>
           <span id="pb-direction">◆ NEUTRAL</span>
           <span id="pb-signal">ثقة: 0%</span>
           <button id="pb-close" title="إخفاء">✕</button>
