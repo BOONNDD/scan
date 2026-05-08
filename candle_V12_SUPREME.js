@@ -1037,18 +1037,24 @@
   function computeKellyAmount(balance) {
     if (!CFG.KELLY_ENABLED || !balance || balance <= 0) return CFG.DEFAULT_AMOUNT;
     const total = STATS.wins + STATS.losses;
-    if (total < 10) return CFG.DEFAULT_AMOUNT; // بيانات غير كافية
+    if (total < 10) return CFG.DEFAULT_AMOUNT;
     const wr = STATS.wins / total;
     const lr = STATS.losses / total;
-    // V11: Dynamic payout ratio — extracted from platform, fallback to 85%
     const avgWinLoss = (_dynamicPayout !== null && _dynamicPayout > 0) ? _dynamicPayout : 0.85;
     const kellyFraction = wr - (lr / avgWinLoss);
     if (kellyFraction <= 0) return CFG.KELLY_MIN;
     const kellyAmount = balance * (kellyFraction * CFG.KELLY_FRACTION);
     const maxAmount   = balance * CFG.KELLY_MAX_PCT;
-    const hardCap     = CFG.KELLY_MAX_USD || Infinity;
+    const hardCap     = CFG.KELLY_MAX_USD > 0 ? CFG.KELLY_MAX_USD : 50;  // [FIX] never Infinity
     const result = Math.max(CFG.KELLY_MIN, Math.min(maxAmount, kellyAmount, hardCap));
     return Math.round(result * 100) / 100;
+  }
+
+  // [FIX] absolute amount safety gate — enforced even when _manualAmountOverride=true
+  function _safeAmount(amt) {
+    const hardCap = CFG.KELLY_MAX_USD > 0 ? CFG.KELLY_MAX_USD : 50;
+    const pctCap  = accountBalance > 0 ? accountBalance * (CFG.KELLY_MAX_PCT || 0.05) : hardCap;
+    return Math.max(CFG.KELLY_MIN || 1, Math.min(amt || tradeAmount, pctCap, hardCap));
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -1239,7 +1245,7 @@
 
   function _sendRawOrder(direction, asset, amount) {
     if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) return;
-    try { const packet = _getCachedPayload(direction, amount); tradeWSOrig(packet); } catch (_) {}
+    try { const packet = _getCachedPayload(direction, _safeAmount(amount)); tradeWSOrig(packet); } catch (_) {}
   }
 
   // ── Ghost Trade Simulator — Smart Recovery (Directive 3, loss streak=1) ──────────
@@ -1764,8 +1770,12 @@
     // EIO4 = السيرفر يرسل '2'، الكلاينت يرد '3' — لا setInterval من طرفنا
     let _pingIntervalId = null;
     if (_isTradeSocket(urlStr)) {
-      tradeWS = ws; tradeWSOrig = _origSend;
-      addLog('🔌 مقبس التداول: ' + urlStr.split('?')[0], 'info');
+      // [FIX] only replace tradeWS when the old socket is already dead
+      const oldAlive = tradeWS && tradeWS.readyState === 1;
+      if (!oldAlive) {
+        tradeWS = ws; tradeWSOrig = _origSend;
+        addLog('🔌 مقبس التداول: ' + urlStr.split('?')[0], 'info');
+      }
       // [FIX v10.6] بدل إرسال '2' (ping — دور السيرفر فقط)، نرسل '3' (pong) كـ keepalive
       // هذا يمنع السيرفر من إغلاق الاتصال بسبب timeout
       if (CFG.DSO_WS_PING_MS > 0) {
@@ -2119,10 +2129,14 @@
         const minConf = isShort ? 2 : CFG.MIN_PATTERN_CONFIDENCE;
         if (tveResult) {
           // ✅ v10.8: سجّل كل إشارة TVE بتفاصيلها
+          // [FIX] TVE-Streak has sigma=0 by design — show streak label instead
+          const _tveSigStr = tveResult.case === 'TVE-Streak'
+            ? 'streak×' + CFG.TVE_STREAK_MIN
+            : 'σ=' + Math.abs(tveResult.sigma || 0).toFixed(2);
           addLog(
-            '[TVE] إشارة: '+tveResult.signal+' | σ='+Math.abs(tveResult.sigma||0).toFixed(2),
+            '[TVE] إشارة: ' + tveResult.signal + ' | ' + _tveSigStr,
             'tve',
-            'conf:'+tveResult.confidence+' | '+tveResult.reason
+            'conf:' + tveResult.confidence + ' | ' + tveResult.reason
           );
           if (tveResult.confidence >= minConf && autoTrade) _onTVESignal(tveResult, a);
         }
@@ -2166,7 +2180,7 @@
       _readySignal = { ...result, trendInfo, asset, confluence: null };
       _readySignalTs = now; _signalPrice = tickBuffers[asset]?.slice(-1)[0] ?? null;
       PERF.mark('psmArmed');
-      addLog('[TVE⚡v10.5] '+result.reason+' | σ='+Math.abs(result.sigma||0).toFixed(2), 'signal');
+      addLog('[TVE⚡v10.5] '+result.reason+' | '+(result.case==='TVE-Streak'?'streak×'+CFG.TVE_STREAK_MIN:'σ='+Math.abs(result.sigma||0).toFixed(2)), 'signal');
       updateSignalDisplay(_readySignal);
       // تنفيذ فوري — Signal Watcher سيتولى أيضاً كطبقة ثانية
       _executeWithJitter(result.signal, asset);
@@ -2355,10 +2369,11 @@
     );
     _flashPhantomUI(phantom.isBullish, predictedClose);
 
-    // ── run CR15 on phantom candle ──────────────────────────────────────
-    _cr15Fire(phantom, asset);
-
     // ── re-run SUPREME-PRED with predicted price for Ghost pre-build ────
+    // [FIX] do NOT call _cr15Fire on phantom — it steals the CR15 cooldown
+    // and prevents the real candle close from firing CR15 correctly.
+    // Phantom's only job: warm up _predBarTick so Ghost Execution has a
+    // fresh packet when the real 70% gate fires.
     _phantomTradeFlag = true;
     try { _predBarTick(asset, predictedClose, now); } catch(_) {}
     _phantomTradeFlag = false;
@@ -2842,6 +2857,12 @@
   function snapToPOTime(rawPeriod) { return PO_VALID_TIMES.reduce((a,b) => Math.abs(b-rawPeriod)<Math.abs(a-rawPeriod)?b:a); }
 
   function executeTrade(direction, asset, overrideAmount) {
+    // [FIX] enforce hard amount cap before any further logic
+    if (overrideAmount) overrideAmount = _safeAmount(overrideAmount);
+    if (!overrideAmount && tradeAmount > _safeAmount(tradeAmount)) {
+      tradeAmount = _safeAmount(tradeAmount);
+      _rebuildPayloadCache();
+    }
     const now = Date.now();
 
     // حارس 0: ✅ v10.9 — sub-second bucket (منع تكرار أوامر في نفس الـ 50ms)
@@ -3789,7 +3810,14 @@
     const _applyAmount = () => {
       const v = parseFloat(amtInp.value);
       if (v > 0 && v !== tradeAmount) {
-        tradeAmount = Math.round(v * 100) / 100;
+        // [FIX] cap manual input at KELLY_MAX_USD — prevents accidental $820+ trades
+        const cap = CFG.KELLY_MAX_USD > 0 ? CFG.KELLY_MAX_USD : 50;
+        const capped = Math.min(Math.round(v * 100) / 100, cap);
+        if (capped !== v) {
+          amtInp.value = capped;
+          addLog('⚠️ مبلغ مُقيَّد إلى الحد الأقصى $' + cap + ' (KELLY_MAX_USD)', 'error');
+        }
+        tradeAmount = capped;
         _manualAmountOverride = true;
         _rebuildPayloadCache();
         addLog('💰 مبلغ يدوي: $' + tradeAmount, 'info');
