@@ -2589,6 +2589,20 @@
     return { trend:'NEUTRAL', strength:50, label:'➡ محايد' };
   }
 
+  // ── اتجاه التيكات الأخيرة للشمعة الحالية (تجاوز فلتر الضعيف) ─────────
+  // يحسب اتجاه آخر 7 تيكات من الشمعة الجارية بدلاً من تاريخ الشموع المكتملة
+  // هذا يمنع H4 من رفض إشارة صحيحة لأن 30 شمعة قديمة "كانت" صاعدة
+  function _tickMomentumDir(asset) {
+    const cc = currentCandles[asset];
+    if (!cc || cc.prices.length < 5) return 'NEUTRAL';
+    const tail   = cc.prices.slice(-7);
+    const pFirst = tail[0], pLast = tail[tail.length - 1];
+    const change = (pLast - pFirst) / pFirst;
+    if (change < -0.00003) return 'SELL';   // هبوط ≥ 3 نقاط
+    if (change >  0.00003) return 'BUY';    // صعود ≥ 3 نقاط
+    return 'NEUTRAL';
+  }
+
   function computeBodySMA(candles, period) {
     const slice = candles.slice(-period);
     if (slice.length < Math.min(period,5)) return null;
@@ -3004,18 +3018,22 @@
         const _trendNow  = analyzeTrend(_trendCandles);
         const _isTVESig  = !_readySignal || _readySignal.isTVE === true;
         // ✅ v10.10 FIX#2: PAT أيضاً مُحجوب في الضعيف — نفس منطق TVE
-        const _downBlock = _trendNow.trend === 'DOWN' || _trendNow.trend === 'DN_WEAK';
-        const _upBlock   = _trendNow.trend === 'UP'   || _trendNow.trend === 'UP_WEAK';
+        // اتجاه الضعيف يُتجاوز إذا كانت التيكات الأخيرة تؤكد الإشارة
+        const _tickMom   = _tickMomentumDir(a);
+        const _downBlock = _trendNow.trend === 'DOWN'
+                        || (_trendNow.trend === 'DN_WEAK' && _tickMom !== 'BUY');
+        const _upBlock   = _trendNow.trend === 'UP'
+                        || (_trendNow.trend === 'UP_WEAK' && _tickMom !== 'SELL');
         if (direction === 'BUY' && _downBlock) {
           addLog('🚫 [H4] رُفض BUY — '+(_isTVESig?'TVE':'PAT')+' ('+_trendNow.label+')', 'error',
                  'شموع:'+_trendCandles.length+' | قوة:'+_trendNow.strength+'%');
-          _readySignal = null;  // V11 FIX: always clear — TVE re-fires naturally; prevents Watcher double-rejection
+          _readySignal = null;
           return;
         }
         if (direction === 'SELL' && _upBlock) {
           addLog('🚫 [H4] رُفض SELL — '+(_isTVESig?'TVE':'PAT')+' ('+_trendNow.label+')', 'error',
                  'شموع:'+_trendCandles.length+' | قوة:'+_trendNow.strength+'%');
-          _readySignal = null;  // V11 FIX: always clear — TVE re-fires naturally; prevents Watcher double-rejection
+          _readySignal = null;
           return;
         }
       }
@@ -3030,10 +3048,11 @@
     const _regime = _PS.snap?.regime ?? 'RANGE';
     const _regBlocked = _PS.regimeBlocked?.[_regime] ?? false;
 
-    // في VOLATILE: يشترط ثقة >= 85%
+    // TVE يحمل 3+ تيكات متتالية — يحق له عتبة أدنى بـ 5%
+    const _isTVE = _readySignal?.isTVE === true;
     const _minConfThreshold = _regime === 'VOLATILE'
       ? CFG.SUPREME_VOLATILE_THRESH
-      : CFG.SUPREME_MIN_CONF;
+      : (_isTVE ? Math.max(65, CFG.SUPREME_MIN_CONF - 5) : CFG.SUPREME_MIN_CONF);
 
     const _supremeOk = (_spDir === direction || _spDir === 'NEUTRAL')
                        && _spConf >= _minConfThreshold
@@ -3222,8 +3241,11 @@
       const _wCandles = candleBuffers[a] || [];
       if (_wCandles.length >= 3) {
         const _wTrend   = analyzeTrend(_wCandles);
-        const _wDownBlk = _wTrend.trend === 'DOWN' || _wTrend.trend === 'DN_WEAK';
-        const _wUpBlk   = _wTrend.trend === 'UP'   || _wTrend.trend === 'UP_WEAK';
+        const _wTickMom = _tickMomentumDir(a);
+        const _wDownBlk = _wTrend.trend === 'DOWN'
+                       || (_wTrend.trend === 'DN_WEAK' && _wTickMom !== 'BUY');
+        const _wUpBlk   = _wTrend.trend === 'UP'
+                       || (_wTrend.trend === 'UP_WEAK' && _wTickMom !== 'SELL');
         if (dir === 'BUY' && _wDownBlk) {
           addLog('[WATCH] 🚫 BUY في هبوط — مُلغاة (' + _wTrend.label + ')', 'error');
           _readySignal = null; return;
@@ -3236,7 +3258,10 @@
 
       // ── [WATCH-5] تحقق نهائي من SUPREME-PRED ──────────────────────────
       const _regime = _PS.snap?.regime ?? 'RANGE';
-      const _minConf = _regime === 'VOLATILE' ? CFG.SUPREME_VOLATILE_THRESH : CFG.SUPREME_MIN_CONF;
+      const _wIsTVE = _readySignal?.isTVE === true;
+      const _minConf = _regime === 'VOLATILE'
+        ? CFG.SUPREME_VOLATILE_THRESH
+        : (_wIsTVE ? Math.max(65, CFG.SUPREME_MIN_CONF - 5) : CFG.SUPREME_MIN_CONF);
       if (_spConfNow < _minConf) {
         addLog('[WATCH] 🔴 ثقة غير كافية ' + _spConfNow + '% < ' + _minConf + '% — إلغاء', 'error');
         _readySignal = null; return;
@@ -3268,15 +3293,21 @@
     const _fCandles = candleBuffers[a] || [];
     if (_fCandles.length >= 3) {
       const _fTrend   = analyzeTrend(_fCandles);
-      const _fDownBlk = _fTrend.trend === 'DOWN' || _fTrend.trend === 'DN_WEAK';
-      const _fUpBlk   = _fTrend.trend === 'UP'   || _fTrend.trend === 'UP_WEAK';
+      const _fTickMom = _tickMomentumDir(a);
+      const _fDownBlk = _fTrend.trend === 'DOWN'
+                     || (_fTrend.trend === 'DN_WEAK' && _fTickMom !== 'BUY');
+      const _fUpBlk   = _fTrend.trend === 'UP'
+                     || (_fTrend.trend === 'UP_WEAK' && _fTickMom !== 'SELL');
       if (dir === 'BUY' && _fDownBlk)  { addLog('[IMM] 🚫 BUY في هبوط — مُلغاة ('+_fTrend.label+')', 'error'); _readySignal = null; return; }
       if (dir === 'SELL' && _fUpBlk)   { addLog('[IMM] 🚫 SELL في صعود — مُلغاة ('+_fTrend.label+')', 'error'); _readySignal = null; return; }
     }
     // SUPREME-PRED gate — re-check confidence before deferred fire
     const _immSpConf = _PS.spConf ?? 0;
     const _immRegime = _PS.regime || 'RANGE';
-    const _immMin    = _immRegime === 'VOLATILE' ? CFG.SUPREME_VOLATILE_THRESH : CFG.SUPREME_MIN_CONF;
+    const _immIsTVE = _readySignal?.isTVE === true;
+    const _immMin   = _immRegime === 'VOLATILE'
+      ? CFG.SUPREME_VOLATILE_THRESH
+      : (_immIsTVE ? Math.max(65, CFG.SUPREME_MIN_CONF - 5) : CFG.SUPREME_MIN_CONF);
     if (_immSpConf < CFG.SUPREME_CANCEL_CONF) {
       addLog('[IMM] 🚫 SUPREME-PRED ثقة سقطت ('+_immSpConf.toFixed(0)+'%) — مُلغاة', 'error');
       _readySignal = null; return;
