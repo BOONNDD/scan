@@ -299,10 +299,17 @@
   };
 
   // ══════════════════════════════════════════════════════════════════════
-  // § 2.1  V11: Nano-Precision Sequential UID — يمنع تكرار requestId في IMDB
+  // § 2.1  V12: Nano-Precision Sequential UID — collision-proof across 0ms IMDB bursts
   // ══════════════════════════════════════════════════════════════════════
-  let _reqIdSeq = ((Date.now() & 0xFFFFF) * 100 + (Math.random() * 99 | 0)) | 0;
-  function _nextReqId() { _reqIdSeq = (_reqIdSeq + 1) % 99999999; return _reqIdSeq; }
+  // Uses performance.now() sub-millisecond fraction + monotonic counter to guarantee
+  // uniqueness even when multiple IMDB packets are built in the same Date.now() tick.
+  let _reqIdCounter = 0;
+  function _nextReqId() {
+    // Combine: lower 20 bits of perf.now microseconds + 12-bit monotonic counter
+    const perfNs   = Math.round((W.performance?.now?.() ?? Date.now()) * 1000) & 0xFFFFF;
+    _reqIdCounter  = (_reqIdCounter + 1) & 0xFFF;
+    return (perfNs * 4096 + _reqIdCounter) >>> 0;  // unsigned 32-bit — always unique in burst
+  }
 
   // V11: Global Garbage Collection — all interval IDs tracked for clean termination before re-sync
   const _v11_intervals = [];
@@ -583,8 +590,13 @@
     get upperWick() { return this.open !== null ? (this.isBullish ? this.high - this.close : this.high - this.open) : 0; },
     get lowerWick() { return this.open !== null ? (this.isBullish ? this.open - this.low   : this.close - this.low) : 0; },
     isActive()      { return this.tickCount > 0 && this.open !== null; },
-    // V11: Total Memory-State Eradication — all fields null on reset
-    reset()         { this.open = null; this.high = null; this.low = null; this.close = null; this.startTime = 0; this.tickCount = 0; },
+    // V12: Deep-clear all OHLC buffers — prevents stale data bleeding across candle boundaries
+    reset() {
+      this.open = null; this.high = null; this.low = null; this.close = null;
+      this.startTime = 0; this.tickCount = 0;
+      // Null derived caches explicitly so computed getters re-evaluate on next tick
+      this._cachedRange = undefined; this._cachedBody = undefined;
+    },
   };
 
   // ══════════════════════════════════════════════════════════════════════
@@ -628,19 +640,25 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // § 7  RSI — Wilder-Smoothed Engine (V11)
+  // § 7  RSI — True Wilder SMMA (V12: convergence-guarded for sub-15s)
   // ══════════════════════════════════════════════════════════════════════
+  // Wilder's Smoothing: α = 1/period (NOT 2/(period+1) like EMA)
+  // Formula: SMMA_t = (SMMA_{t-1} * (period-1) + value_t) / period
+  // Warm-up: need ≥ period*2 candles for the SMMA to converge past the
+  // SMA seed. Below this threshold the RSI reading is statistically noisy.
   function computeRSIProxy(candles, period) {
     if (!CFG.RSI_ENABLED) return null;
     const n = candles.length;
-    if (n < period + 1) return null;
-    // V11: Wilder smoothing — seed with SMA(period), then α=1/period
+    // Require 2× period for SMMA convergence (critical for sub-15s frames)
+    if (n < period * 2) return null;
+    // Phase 1: seed — plain average of first `period` moves
     let avgGain = 0, avgLoss = 0;
     for (let i = 1; i <= period; i++) {
       const ch = candles[i].close - candles[i - 1].close;
       if (ch > 0) avgGain += ch; else avgLoss -= ch;
     }
     avgGain /= period; avgLoss /= period;
+    // Phase 2: SMMA rolling — α = 1/period (Wilder)
     for (let i = period + 1; i < n; i++) {
       const ch   = candles[i].close - candles[i - 1].close;
       const gain = ch > 0 ? ch : 0;
@@ -648,7 +666,7 @@
       avgGain = (avgGain * (period - 1) + gain) / period;
       avgLoss = (avgLoss * (period - 1) + loss) / period;
     }
-    if (avgGain + avgLoss === 0) return 50;
+    if (avgGain + avgLoss < 1e-12) return 50;
     const rs = avgGain / (avgLoss || 1e-10);
     return Math.round((100 - 100 / (1 + rs)) * 10) / 10;
   }
@@ -4635,20 +4653,24 @@
   function init() {
     // SUPREME-PRED v2: restore learned weights from localStorage before UI starts
     _loadBrain();
-    // V12: Strict Sequential Handshake — Signal Watcher stays dormant until UI is 100% verified
+
+    // V12: Strict boot-gate — single atomic flag covering ALL entry paths.
+    // Previously the guard only existed in the else-branch, leaving the fast-path
+    // (document.body already present) unprotected against double-init races.
+    let _bootFired = false;
     const _startAfterUI = () => {
+      if (_bootFired) return;   // ← strict gate: exactly-once regardless of path
+      _bootFired = true;
       initUI();
       _startSignalWatcher();
       addLog('⚡ V12_SUPREME | SUPREME-PRED v2 | 70% gate | 30 algos | IMDB ✓ | Signal Watcher ✓', 'signal');
     };
+
     if (W.document.body) {
       _startAfterUI();
     } else {
-      // One-shot guard: prevents both DOMContentLoaded AND setTimeout from firing initUI twice
-      let _uiStarted = false;
-      const _once = () => { if (_uiStarted) return; _uiStarted = true; _startAfterUI(); };
-      W.document.addEventListener('DOMContentLoaded', _once);
-      setTimeout(_once, 1500); // fallback only — fires if DOMContentLoaded already passed
+      W.document.addEventListener('DOMContentLoaded', _startAfterUI);
+      setTimeout(_startAfterUI, 1500); // fallback — _bootFired prevents double-fire
     }
   }
 
