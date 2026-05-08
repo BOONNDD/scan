@@ -421,7 +421,17 @@
   let _lastDetectedCount  = 0;
   let _lastFailedSignal   = null;
   let _lossStreakPauseUntil = 0;
-  let _periodLockUntil    = 0;    // ✅ v10.10 FIX#4: قفل زمني — يمنع chafor من تغيير الفريم لـ 30ث بعد مصدر موثوق
+  let _periodLockUntil    = 0;
+
+  // ── Dynamic Cooldown state (Directive 3) ─────────────────────────────
+  let _ghostTradeActive   = false;   // loss streak=1: simulate next trade, don't execute
+  let _ghostSignal        = null;    // { signal, asset, entryPrice, expiryMs }
+  let _ghostWatching      = false;   // ghost trade timer is running
+  let _recalibrating      = false;   // loss streak=3: wait for Hurst H > 0.6
+
+  // ── IMDB Magnet Effect state (Directive 2) ───────────────────────────
+  let _magnetPulse2Active = false;
+  let _magnetPulse3Active = false;
 
   let _readySignal    = null;
   let _readySignalTs  = 0;
@@ -1109,50 +1119,137 @@
     const pct   = getIMDBConfPct(confScore);
     const base  = tradeAmount;
     const mults = [1.0, CFG.IMDB_AMOUNT_MULT_2, CFG.IMDB_AMOUNT_MULT_3, CFG.IMDB_AMOUNT_MULT_4];
-
     const emoji = tier === 4 ? '💎💎💎💎' : tier === 3 ? '🔥🔥🔥' : '🔥🔥';
-    addLog(
-      emoji + ' [IMDB×' + tier + '] ' + signal +
-      ' | SUPREME-PRED: ' + pct + '%',
-      'signal'
-    );
 
-    // الصفقة #1 — عبر executeTrade (تضبط tradeExec + يُسجَّل)
+    addLog(emoji + ' [IMDB×' + tier + '] ' + signal + ' | SUPREME-PRED: ' + pct + '%', 'signal');
+
+    // ── Pulse 1: Immediate execution ──────────────────────────────────
     executeTrade(signal, asset);
-
-    // الصفقات #2، #3، #4 — مع حارس التوافق الكامل (V11: Protected Pulse)
-    for (let i = 1; i < tier; i++) {
-      const amt      = Math.max(1, Math.round(base * mults[i] * 100) / 100);
-      const tradeNum = i + 1;
-      const _delay   = CFG.IMDB_INSTANT_DELAY_MS + i; // nano-stagger for unique timing
-      setTimeout(() => {
-        if (!autoTrade) return;
-        // V11: Same Confluence Guard for every IMDB pulse
-        if (_lossStreakPauseUntil > Date.now()) {
-          addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 مُلغاة — وقف الخسائر', 'error'); return;
-        }
-        const _imCandles = candleBuffers[asset] || [];
-        if (_imCandles.length >= 3) {
-          const _imTrend = analyzeTrend(_imCandles);
-          const _imDown  = _imTrend.trend === 'DOWN' || _imTrend.trend === 'DN_WEAK';
-          const _imUp    = _imTrend.trend === 'UP'   || _imTrend.trend === 'UP_WEAK';
-          if (signal === 'BUY'  && _imDown) { addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 BUY في هبوط — مُلغاة (' + _imTrend.label + ')', 'error'); return; }
-          if (signal === 'SELL' && _imUp)   { addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 SELL في صعود — مُلغاة (' + _imTrend.label + ')', 'error'); return; }
-        }
-        addLog(emoji + ' [IMDB #' + tradeNum + '] ' + signal + ' $' + amt, 'signal');
-        _sendRawOrder(signal, asset, amt);
-      }, _delay);
-    }
-
     _lastIMDBTradeMs = Date.now();
     _lastIMDBCount   = tier;
     STATS.doubles    = (STATS.doubles || 0) + (tier - 1);
     _lastTradeWasDouble = tier > 1;
+
+    // ── Tier-3: Magnet Effect (Directive 2) ───────────────────────────
+    // Pulse 2: wait for 0.5-pip adverse move (better entry by retracement)
+    // Pulse 3: execute only if Pulse 2 fired AND trend acceleration > 0
+    if (tier === 3) {
+      const amt2  = Math.max(1, Math.round(base * mults[1] * 100) / 100);
+      const amt3  = Math.max(1, Math.round(base * mults[2] * 100) / 100);
+      const p1Ref = (tickBuffers[asset] || []).slice(-1)[0] ?? null;
+      // 0.5 pip threshold = 5 minimum tick sizes (adaptive to instrument)
+      const pipThresh = _tickSize !== null ? _tickSize * 5 : 0.00005;
+      let pulse2Fired = false;
+      let magnetDeadline = Date.now() + 3000; // cancel if not filled within 3s
+
+      _magnetPulse2Active = true;
+      _magnetPulse3Active = false;
+
+      const magnetId = _v11_setInterval(() => {
+        if (!autoTrade || !_magnetPulse2Active || Date.now() > magnetDeadline) {
+          _magnetPulse2Active = false; _magnetPulse3Active = false;
+          clearInterval(magnetId);
+          if (!pulse2Fired) addLog(emoji + ' [MAGNET P2] ⏱ انتهى الوقت — مُلغاة', 'info');
+          return;
+        }
+        if (_lossStreakPauseUntil > Date.now() || _recalibrating) {
+          _magnetPulse2Active = false; clearInterval(magnetId); return;
+        }
+        const curTick = (tickBuffers[asset] || []).slice(-1)[0];
+        if (p1Ref === null || curTick === undefined) return;
+
+        // For BUY: better entry if price dipped (adverse = price fell)
+        // For SELL: better entry if price rose (adverse = price rose)
+        const movedAgainst = signal === 'BUY'
+          ? (p1Ref - curTick) >= pipThresh
+          : (curTick - p1Ref) >= pipThresh;
+
+        if (!movedAgainst || pulse2Fired) return;
+        pulse2Fired = true;
+        _magnetPulse2Active = false;
+        _magnetPulse3Active = true;
+        addLog(emoji + ' [MAGNET P2] ✅ تراجع +0.5 pip → تنفيذ P2 بـ $' + amt2, 'signal');
+        _sendRawOrder(signal, asset, amt2);
+
+        // ── Pulse 3: fire only if trend acceleration still positive ────
+        setTimeout(() => {
+          if (!autoTrade || !_magnetPulse3Active) return;
+          _magnetPulse3Active = false;
+          if (_lossStreakPauseUntil > Date.now() || _recalibrating) return;
+          // Trend acceleration = latest accel value > 0 (BUY) or < 0 (SELL)
+          const lastAccel = _PS.accels.length > 0 ? _PS.accels[_PS.accels.length - 1] : 0;
+          const accelOk   = signal === 'BUY' ? lastAccel > 0 : lastAccel < 0;
+          if (!accelOk) {
+            addLog(emoji + ' [MAGNET P3] ❌ تسارع ضعيف (' + lastAccel.toFixed(6) + ') — مُلغاة', 'info');
+            return;
+          }
+          addLog(emoji + ' [MAGNET P3] ✅ تسارع مؤكد → تنفيذ P3 بـ $' + amt3, 'signal');
+          _sendRawOrder(signal, asset, amt3);
+        }, CFG.IMDB_INSTANT_DELAY_MS + 2);
+
+        clearInterval(magnetId);
+      }, 50); // poll every 50ms for adverse price move
+
+    // ── Tier-2 / Tier-4: Original pulse logic ─────────────────────────
+    } else {
+      for (let i = 1; i < tier; i++) {
+        const amt      = Math.max(1, Math.round(base * mults[i] * 100) / 100);
+        const tradeNum = i + 1;
+        const _delay   = CFG.IMDB_INSTANT_DELAY_MS + i;
+        setTimeout(() => {
+          if (!autoTrade) return;
+          if (_lossStreakPauseUntil > Date.now()) {
+            addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 مُلغاة — وقف الخسائر', 'error'); return;
+          }
+          if (_recalibrating) { addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 إعادة معايرة', 'error'); return; }
+          const _imCandles = candleBuffers[asset] || [];
+          if (_imCandles.length >= 3) {
+            const _imTrend = analyzeTrend(_imCandles);
+            const _imDown  = _imTrend.trend === 'DOWN' || _imTrend.trend === 'DN_WEAK';
+            const _imUp    = _imTrend.trend === 'UP'   || _imTrend.trend === 'UP_WEAK';
+            if (signal === 'BUY'  && _imDown) { addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 BUY في هبوط — مُلغاة', 'error'); return; }
+            if (signal === 'SELL' && _imUp)   { addLog(emoji + ' [IMDB #' + tradeNum + '] 🚫 SELL في صعود — مُلغاة', 'error'); return; }
+          }
+          addLog(emoji + ' [IMDB #' + tradeNum + '] ' + signal + ' $' + amt, 'signal');
+          _sendRawOrder(signal, asset, amt);
+        }, _delay);
+      }
+    }
   }
 
   function _sendRawOrder(direction, asset, amount) {
     if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) return;
     try { const packet = _getCachedPayload(direction, amount); tradeWSOrig(packet); } catch (_) {}
+  }
+
+  // ── Ghost Trade Simulator — Smart Recovery (Directive 3, loss streak=1) ──────────
+  // Intercepts the next ready signal and simulates its outcome in memory.
+  // Only returns to real trading after a simulated win confirms market readiness.
+  function _ghostSimulate(signal, asset, entryPrice, periodSec) {
+    if (_ghostWatching) return; // only one ghost at a time
+    _ghostWatching    = true;
+    _ghostTradeActive = false; // consumed — watcher now running
+    _ghostSignal      = { signal, asset, entryPrice };
+    const expireMs = Math.max(periodSec * 1000, 5000);
+    addLog('[شبح] 👻 صفقة وهمية → ' + signal + ' @ ' + entryPrice.toFixed(5) + ' | انتهاء: ' + (expireMs/1000).toFixed(0) + 'ث', 'info');
+
+    setTimeout(() => {
+      if (!_ghostWatching || !_ghostSignal) return;
+      _ghostWatching = false;
+      const cur = (tickBuffers[_ghostSignal.asset] || []).slice(-1)[0];
+      if (cur === undefined) { _ghostTradeActive = true; return; } // no price data — retry
+      const ghostWon = _ghostSignal.signal === 'BUY' ? cur > _ghostSignal.entryPrice
+                                                      : cur < _ghostSignal.entryPrice;
+      _ghostSignal = null;
+      if (ghostWon) {
+        addLog('[شبح] 👻✅ فوز وهمي — السوق جاهز | استئناف التداول الحقيقي', 'signal');
+        updatePauseDisplay(false);
+        // _ghostTradeActive stays false → real trades resume
+      } else {
+        addLog('[شبح] 👻❌ خسارة وهمية — السوق غير مستقر | صفقة وهمية أخرى', 'info');
+        _ghostTradeActive = true; // arm the next ghost
+      }
+    }, expireMs);
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -1418,13 +1515,40 @@
       STATS.wins++; STATS.lossStreak = 0;
       STATS.winStreak = (STATS.winStreak || 0) + 1;
       if (STATS.winStreak > (STATS.bestStreak || 0)) STATS.bestStreak = STATS.winStreak;
+      // Clear any Smart Recovery / recalibration state on a real win
+      if (_ghostTradeActive || _ghostWatching) {
+        _ghostTradeActive = false; _ghostWatching = false; _ghostSignal = null;
+        addLog('✅ فوز حقيقي — الغاء وضع الشبح | التداول الحقيقي مستمر', 'signal');
+        updatePauseDisplay(false);
+      }
+      if (_recalibrating) { _recalibrating = false; updatePauseDisplay(false); }
     } else {
       STATS.losses++; STATS.lossStreak++; STATS.winStreak = 0;
-      if (STATS.lossStreak >= CFG.MAX_LOSS_STREAK) {
-        _lossStreakPauseUntil = Date.now() + CFG.LOSS_STREAK_PAUSE_MS;
-        addLog('⛔ ' + CFG.MAX_LOSS_STREAK + ' خسائر — وقف ' + (CFG.LOSS_STREAK_PAUSE_MS/1000) + 'ث', 'error');
+
+      if (STATS.lossStreak === 1 && !_ghostTradeActive && !_ghostWatching) {
+        // ── Smart Recovery: simulate the next signal before committing real capital ──
+        _ghostTradeActive = true;
+        addLog('⚠️ خسارة — وضع الشبح نشط | انتظار تأكيد وهمي قبل التداول الحقيقي', 'info');
         updatePauseDisplay(true);
-        setTimeout(() => { _lossStreakPauseUntil = 0; STATS.lossStreak = 0; addLog('✅ انتهى الوقف — جاهز', 'signal'); updatePauseDisplay(false); }, CFG.LOSS_STREAK_PAUSE_MS);
+
+      } else if (STATS.lossStreak >= CFG.MAX_LOSS_STREAK) {
+        // ── Recalibration: flush all rolling buffers, wait for Hurst H > 0.6 ──────
+        _recalibrating    = true;
+        _ghostTradeActive = false;
+        _ghostWatching    = false;
+        _lossStreakPauseUntil = 0;
+
+        // Flush rolling state so SUPREME-PRED v2 builds fresh signal from scratch
+        _PS.vels.length   = 0; _PS.accels.length = 0;
+        _PS.W5.length = 0; _PS.W10.length = 0; _PS.W20.length = 0;
+        _PS.W40.length = 0; _PS.W80.length = 0; _PS.lr_prices.length = 0;
+        _PS.ac_velBuf.fill(0); _PS.ac_velBuf_n = 0;
+        _PS.kf_x = null; _PS.kf_p = 1.0;
+        _PS.ent_up = 0; _PS.ent_dn = 0; _PS.ent_n = 0;
+        _PS.hurst_h = 0.5;
+
+        addLog('🔄 ' + CFG.MAX_LOSS_STREAK + ' خسائر — إعادة معايرة | تفريغ الذاكرة | انتظار H > 0.6', 'error');
+        updatePauseDisplay(true);
       }
     }
     // 🆕 PPT
@@ -1900,6 +2024,28 @@
     if (!cc) { currentCandles[a] = { open:price, high:price, low:price, prices:[price], startTime:now }; }
     else { cc.prices.push(price); if (price>cc.high) cc.high=price; if (price<cc.low) cc.low=price; }
     if (a === activeAsset) {
+      // ── NEURAL-TICK: Packet Spike Detection (Directive 1) ────────────────
+      // More than 3 ticks arriving within a 100ms window = platform-injected noise burst.
+      // Apply a 20% confidence penalty for 500ms to avoid "Ghost-Volatility" entries.
+      {
+        const ps = _PS;
+        const tsb = ps.tickTs, cap = tsb.length;
+        if (ps.tickTs_n < cap) { tsb[ps.tickTs_n++] = now; }
+        else { tsb.copyWithin(0, 1); tsb[cap - 1] = now; }
+        const n4 = Math.min(ps.tickTs_n, 4);
+        const oldest4 = tsb[ps.tickTs_n >= 4 ? ps.tickTs_n - 4 : 0];
+        if (n4 >= 4 && (now - oldest4) < 100) {
+          if (!ps.spikeActive) {
+            ps.spikeActive = true;
+            ps.spikePenaltyUntil = now + 500;
+            addLog('[NEURAL-TICK] ⚡ تدفق مكثف — تخفيض ثقة 20% لـ 500ms', 'info');
+          }
+        }
+        if (ps.spikeActive && now > ps.spikePenaltyUntil) {
+          ps.spikeActive = false;
+        }
+      }
+
       // 🔴 PRED-BAR: أعلى أولوية — يُشغَّل أول شيء على كل تيك قبل أي تحليل آخر
       _predBarTick(a, price, now);
       updateLivePrice(price); renderCandleRow(); resetTickCandleTimer(a);
@@ -2672,6 +2818,31 @@
     _v11_setInterval(() => {
       if (!autoTrade || !_readySignal) return;
       const now = Date.now();
+
+      // ── [WATCH-0] Dynamic Cooldown: Recalibration + Ghost Trade guards ──────────
+      if (_recalibrating) {
+        // Exit recalibration only when Hurst H > 0.6 (trending, predictable market)
+        if (_PS.hurst_h > CFG.SUPREME_HURST_TREND) {
+          _recalibrating = false;
+          STATS.lossStreak = 0;
+          addLog('[RECAL] ✅ إعادة معايرة اكتملت — H=' + _PS.hurst_h.toFixed(2) + ' > 0.6 | عودة التداول', 'signal');
+          updatePauseDisplay(false);
+        } else {
+          return; // still recalibrating — block all signals
+        }
+      }
+      if (_ghostTradeActive && !_ghostWatching) {
+        // Intercept this signal as a Ghost Trade: simulate instead of execute
+        const dir      = _readySignal.signal;
+        const a        = _readySignal.asset || activeAsset;
+        const curPrice = (tickBuffers[a] || []).slice(-1)[0];
+        _readySignal   = null;  // consume the signal
+        if (curPrice !== undefined && dir && a) {
+          _ghostSimulate(dir, a, curPrice, candlePeriod || 60);
+        }
+        return;
+      }
+      if (_ghostWatching) return; // ghost in flight — real trades blocked
 
       // ── [WATCH-1] الإشارة انتهت بعد 2500ms ──────────────────────────
       if (now - _readySignalTs > CFG.SIGNAL_WATCHER_EXPIRY_MS) {
@@ -3574,6 +3745,10 @@
     direction : 'NEUTRAL', confidence: 0,
     spConf    : 0,   // SUPREME-PRED ثقة من 0-100 (الإخراج الرئيسي)
 
+    // ─ NEURAL-TICK: Packet Spike detector (Directive 1) ────────────────
+    tickTs    : new Float64Array(10), tickTs_n: 0,
+    spikeActive: false, spikePenaltyUntil: 0,
+
     // ─ نوافذ الأسعار (rolling) ─────────────────────────────
     W5  : [], W10 : [], W20 : [], W40 : [], W80 : [],
 
@@ -3739,6 +3914,77 @@
     else           S_ref.v += weight * Math.abs(score);
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // ══════════ [_MATH] Protected Math Closure (Directive 4) ══════════════
+  // All new mathematical kernels are isolated here to prevent scope pollution.
+  // Accessible as _MATH.sigmoid6(x), _MATH.rsAnalysis(arr), etc.
+  // ══════════════════════════════════════════════════════════════════════
+  const _MATH = Object.freeze({
+
+    // ─ Sigmoid with steepness factor 6 (wider separation than standard logistic)
+    sigmoid6: (x) => 1 / (1 + Math.exp(-x * 6)),
+
+    // ─ Wilder SMMA step: α = 1/period
+    wilderStep: (prev, val, period) => (prev * (period - 1) + val) / period,
+
+    // ─ R/S analysis on a numeric array → returns R/S ratio or null
+    rsAnalysis: (w) => {
+      if (!w || w.length < 4) return null;
+      const n = w.length;
+      let sum = 0;
+      for (let i = 0; i < n; i++) sum += w[i];
+      const m = sum / n;
+      let cum = 0, mx = -Infinity, mn = Infinity;
+      let ss = 0;
+      for (let i = 0; i < n; i++) {
+        cum += w[i] - m;
+        if (cum > mx) mx = cum;
+        if (cum < mn) mn = cum;
+        ss += (w[i] - m) ** 2;
+      }
+      const s = Math.sqrt(ss / n);
+      return s > 1e-12 ? (mx - mn) / s : null;
+    },
+
+    // ─ Hurst exponent estimate from 4 R/S windows: mean of log(RS)/log(n)
+    hurstFromVels: (vels) => {
+      if (!vels || vels.length < 32) return 0.5;
+      const rs = (n) => {
+        const w = vels.slice(-n);
+        return _MATH.rsAnalysis(w);
+      };
+      const pts = [[4,rs(4)],[8,rs(8)],[16,rs(16)],[32,rs(32)]];
+      const valid = pts.filter(([,r]) => r !== null && r > 0);
+      if (valid.length < 2) return 0.5;
+      const h = valid.map(([n,r]) => Math.log(r)/Math.log(n));
+      return Math.max(0.1, Math.min(0.9, h.reduce((a,v)=>a+v,0)/h.length));
+    },
+
+    // ─ Kalman filter step (1D, constant velocity model)
+    kalmanStep: (kf_x, kf_p, measurement, Q, R) => {
+      const p_pred = kf_p + Q;
+      const K      = p_pred / (p_pred + R);
+      const x_new  = kf_x + K * (measurement - kf_x);
+      const p_new  = (1 - K) * p_pred;
+      return { x: x_new, p: p_new, K };
+    },
+
+    // ─ Shannon entropy H from probability p (0..1) of one class
+    shannonH: (p) => {
+      const q = 1 - p;
+      return -(p > 0 ? p * Math.log2(p) : 0) - (q > 0 ? q * Math.log2(q) : 0);
+    },
+
+    // ─ Autocorrelation coefficient at a given lag over a Float64Array/Array
+    autocorrLag: (buf, n, lag) => {
+      if (n < lag + 2) return 0;
+      let sx=0,sy=0,sxy=0,sx2=0,cnt=0;
+      for (let i=0;i<n-lag;i++){sx+=buf[i];sy+=buf[i+lag];sxy+=buf[i]*buf[i+lag];sx2+=buf[i]*buf[i];cnt++;}
+      const d = cnt*sx2 - sx*sx;
+      return Math.abs(d) > 1e-20 ? (cnt*sxy - sx*sy) / d : 0;
+    },
+  });
+
   // ══════════ [C] الدالة الرئيسية SUPREME-PRED v2 — تُستدعى على كل تيك ══
   function _predBarTick(asset, price, now) {
     const ps = _PS;
@@ -3776,7 +4022,7 @@
       ps.e55 = price*_EK.k55 + ps.e55 *(1-_EK.k55);
     }
 
-    if (prev === null) { _predBarRefreshUI(); return; }
+    if (prev === null) { _predBarScheduleUI(); return; }
 
     // ════ C: حساب السرعة والتسارع ════════════════════════════════════
     const vel = price - prev;
@@ -3829,10 +4075,8 @@
       ps.ent_n++;
       if (ps.ent_n > 30) { ps.ent_n=30; ps.ent_up=Math.max(0,ps.ent_up-0.5); ps.ent_dn=Math.max(0,ps.ent_dn-0.5); }
       if (ps.ent_n >= 5) {
-        const pu = ps.ent_up/ps.ent_n, pd = ps.ent_dn/ps.ent_n;
-        const H = -(pu>0?pu*Math.log2(pu):0) - (pd>0?pd*Math.log2(pd):0);
-        // H ∈ [0,1]: 0=اتجاه نقي، 1=فوضى كاملة
-        // كلما انخفض H، زادت قوة إشارة الاتجاه الحالي
+        const pu = ps.ent_up/ps.ent_n;
+        const H  = _MATH.shannonH(pu); // H ∈ [0,1]: 0=اتجاه نقي، 1=فوضى كاملة
         const clarity = 1 - H;
         const dominates = ps.ent_up > ps.ent_dn ? 1 : -1;
         entropyScore = clarity * dominates; // -1..1
@@ -3874,18 +4118,14 @@
       }
     }
 
-    // ── [S1] Kalman Filter prediction ────────────────────────────────
+    // ── [S1] Kalman Filter prediction (_MATH.kalmanStep) ─────────────
     let kalmanScore = 0;
     {
-      const Q = CFG.SUPREME_KALMAN_Q, R = CFG.SUPREME_KALMAN_R;
       if (ps.kf_x === null) {
         ps.kf_x = price; ps.kf_p = 1.0;
       } else {
-        const p_pred = ps.kf_p + Q;
-        const K      = p_pred / (p_pred + R);
-        const x_prev = ps.kf_x;
-        ps.kf_x = x_prev + K * (price - x_prev);
-        ps.kf_p = (1 - K) * p_pred;
+        const kf = _MATH.kalmanStep(ps.kf_x, ps.kf_p, price, CFG.SUPREME_KALMAN_Q, CFG.SUPREME_KALMAN_R);
+        ps.kf_x = kf.x; ps.kf_p = kf.p;
         const kDiff = price - ps.kf_x;
         ps.kalmanPredDir   = kDiff > 0 ? 1 : kDiff < 0 ? -1 : 0;
         ps.kalmanMagnitude = Math.min(1, Math.abs(kDiff) / (ps.vol * 2 || 1e-9));
@@ -3914,24 +4154,9 @@
       }
     }
 
-    // ── [S3] Enhanced Hurst (4 windows: 4/8/16/32) ───────────────────
-    {
-      const pv = ps.vels;
-      if (pv.length >= 32) {
-        const _rs = (w) => {
-          if (w.length<4) return null;
-          const m=_mean(w); let cum=0,mx=-Infinity,mn=Infinity;
-          for (const v of w){cum+=v-m; if(cum>mx)mx=cum; if(cum<mn)mn=cum;}
-          const s=_std(w,m); return s>1e-12?(mx-mn)/s:null;
-        };
-        const rs4=_rs(pv.slice(-4)),rs8=_rs(pv.slice(-8)),rs16=_rs(pv.slice(-16)),rs32=_rs(pv.slice(-32));
-        const hv=[];
-        if(rs4 >0) hv.push(Math.log(rs4) /Math.log(4));
-        if(rs8 >0) hv.push(Math.log(rs8) /Math.log(8));
-        if(rs16>0) hv.push(Math.log(rs16)/Math.log(16));
-        if(rs32>0) hv.push(Math.log(rs32)/Math.log(32));
-        if(hv.length>=2) ps.hurst_h = Math.max(0.1,Math.min(0.9,hv.reduce((a,v)=>a+v,0)/hv.length));
-      }
+    // ── [S3] Enhanced Hurst via _MATH.hurstFromVels (4 windows: 4/8/16/32) ──
+    if (ps.vels.length >= 32) {
+      ps.hurst_h = _MATH.hurstFromVels(ps.vels);
     }
 
     // ── [S4] AutoCorrelation lags 1-5 ────────────────────────────────
@@ -3940,12 +4165,7 @@
     const acLags=[0,0,0,0,0];
     {
       const vb=ps.ac_velBuf, nv=Math.min(ps.ac_velBuf_n, 10);
-      for (let lag=1;lag<=5;lag++){
-        if (nv<lag+2) continue;
-        let sx=0,sy=0,sxy=0,sx2=0,n2=0;
-        for (let i=0;i<nv-lag;i++){sx+=vb[i];sy+=vb[i+lag];sxy+=vb[i]*vb[i+lag];sx2+=vb[i]*vb[i];n2++;}
-        const d=n2*sx2-sx*sx; if(Math.abs(d)>1e-20) acLags[lag-1]=(n2*sxy-sx*sy)/d;
-      }
+      for (let lag=1;lag<=5;lag++) acLags[lag-1]=_MATH.autocorrLag(vb, nv, lag);
     }
 
     // ── [S5] ROC consensus (3/8/15/25 windows) ────────────────────────
@@ -4163,6 +4383,8 @@
     // ════ V: عقوبة النظام وحساب الثقة النهائية ══════════════════════
     let spConf = Math.abs(buyPct-50)*2; // 0-100
     if (ps.regime === 'VOLATILE') spConf *= 0.75; // عقوبة التقلب
+    // NEURAL-TICK penalty: packet spike detected → -20% confidence
+    if (ps.spikeActive) spConf *= 0.80;
     spConf = Math.round(Math.min(100, Math.max(0, spConf)));
 
     const direction = buyPct > 55 ? 'BUY' : sellPct > 55 ? 'SELL' : 'NEUTRAL';
@@ -4190,8 +4412,21 @@
       kalmanDir:ps.kalmanPredDir, kalmanMag:ps.kalmanMagnitude, r2:ps.lr_r2,
     };
 
-    // تحديث الواجهة كل تيك
-    _predBarRefreshUI();
+    // تحديث الواجهة — مجدوَل على rAF لتجنب تحديثات DOM متكررة في نفس الفريم
+    _predBarScheduleUI();
+  }
+
+  // ─── rAF scheduler — batches DOM updates to the paint frame (Directive 4) ─
+  // Multiple ticks can arrive before the next frame; only the latest snapshot
+  // is painted, keeping the trading computation loop at zero DOM overhead.
+  let _predBarRafPending = false;
+  function _predBarScheduleUI() {
+    if (_predBarRafPending) return;
+    _predBarRafPending = true;
+    W.requestAnimationFrame(() => {
+      _predBarRafPending = false;
+      _predBarRefreshUI();
+    });
   }
 
   // ─── تحديث واجهة شريط التنبؤ SUPREME-PRED v2 ───────────────────
