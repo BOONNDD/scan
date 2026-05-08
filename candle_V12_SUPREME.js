@@ -287,9 +287,8 @@
     SUPREME_KALMAN_Q        : 1e-5,  // ضجيج العملية (process noise)
     SUPREME_KALMAN_R        : 0.01,  // ضجيج القياس (measurement noise)
 
-    // ─── CR15: استراتيجية عكس الشمعة على S15 ──────────────────────────
+    // ─── CR15: استراتيجية عكس الشمعة — كل فريم ───────────────────────
     CR15_ENABLED            : true,  // تفعيل استراتيجية CR15
-    CR15_PERIOD_SEC         : 15,    // الشمعة يجب أن تكون 15 ثانية
     CR15_TRADE_SEC          : 3,     // مدة الصفقة 3 ثوانٍ
     CR15_AMOUNT             : 0,     // 0 = استخدم tradeAmount الافتراضي
 
@@ -2248,14 +2247,12 @@
   // المنطق: شمعة S15 صاعدة → بيع | شمعة هابطة → شراء | مدة 3ث | فوري
   function _cr15Fire(candle, asset) {
     if (!CFG.CR15_ENABLED) return;
-    // شرط الفريم: يجب أن تكون الشمعة 15 ثانية بالضبط
-    if (candlePeriod !== CFG.CR15_PERIOD_SEC) return;
     if (asset !== activeAsset) return;
     // شرط الاتصال: يجب أن يكون WebSocket متصلاً
     if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) {
       addLog('⚠ CR15 — WebSocket غير متصل', 'error'); return;
     }
-    // شرط الكولداون: منع التكرار في نفس الشمعة
+    // شرط الكولداون: منع التكرار قبل انتهاء الصفقة
     const now = Date.now();
     if (now - _cr15LastFire < (CFG.CR15_TRADE_SEC + 2) * 1000) return;
     // شرط التنفيذ: لا تتداول أثناء صفقة نشطة
