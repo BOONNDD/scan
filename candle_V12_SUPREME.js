@@ -2267,6 +2267,7 @@
       const realClose = cc.prices[cc.prices.length - 1];
       const err = Math.abs(realClose - _phantomPredicted) / (realClose || 1);
       const deltaMs = Date.now() - _phantomTriggerTs;
+      _qppUpdateErrors(cc.prices, realClose);  // feed real close back into QPP models
       console.log('[V13 Phantom] err=' + (err * 100).toFixed(4) +
         '% | predicted=' + _phantomPredicted.toFixed(5) +
         ' actual=' + realClose.toFixed(5) +
@@ -2310,29 +2311,112 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // § V13 — predictClosePrice: weighted linear regression on last N ticks
+  // § V13.1 — QUANTUM PHANTOM PREDICTOR (QPP)
   // ══════════════════════════════════════════════════════════════════════
-  // Weight[i] = i+1 so recent ticks dominate. Returns predicted next price.
-  function predictClosePrice(prices, n) {
-    n = n || 5;
-    const len = prices.length;
-    if (len < 2) return prices[len - 1] || 0;
-    const sl = prices.slice(-n);
-    const m  = sl.length;
+  // Multi-model ensemble: combines 4 independent estimators and weights
+  // them by their recent accuracy (online learning per-model error tracking).
+  // ══════════════════════════════════════════════════════════════════════
+
+  // ─ Model accuracy tracker (online, per-estimator) ─
+  const _qppErr = { wlr: 0.01, ema3: 0.01, holt: 0.01, mom: 0.01 };  // EWMA of abs error
+  const _qppK   = 0.25;   // error EWMA smoothing
+
+  // ── Model 1: Weighted Linear Regression (OLS, weight = i+1) ──────────
+  function _qppWLR(sl) {
+    const m = sl.length;
     let sw=0, swx=0, swy=0, swx2=0, swxy=0;
     for (let i = 0; i < m; i++) {
       const w = i + 1;
-      sw   += w;
-      swx  += w * i;
-      swy  += w * sl[i];
-      swx2 += w * i * i;
-      swxy += w * i * sl[i];
+      sw += w; swx += w*i; swy += w*sl[i]; swx2 += w*i*i; swxy += w*i*sl[i];
     }
-    const det = sw * swx2 - swx * swx;
-    if (Math.abs(det) < 1e-14) return sl[m - 1];
-    const slope = (sw * swxy - swx * swy) / det;
-    const intercept = (swy - slope * swx) / sw;
+    const det = sw*swx2 - swx*swx;
+    if (Math.abs(det) < 1e-14) return sl[m-1];
+    const slope = (sw*swxy - swx*swy) / det;
+    const intercept = (swy - slope*swx) / sw;
     return intercept + slope * m;
+  }
+
+  // ── Model 2: Triple EMA (TEMA) — removes EMA lag via 3× subtraction ──
+  function _qppTEMA(sl) {
+    const k = 2 / (sl.length + 1);
+    let e1 = sl[0], e2 = sl[0], e3 = sl[0];
+    for (let i = 1; i < sl.length; i++) {
+      e1 = sl[i] * k + e1 * (1 - k);
+      e2 = e1    * k + e2 * (1 - k);
+      e3 = e2    * k + e3 * (1 - k);
+    }
+    // TEMA = 3×EMA1 - 3×EMA2 + EMA3  (zero-lag estimate)
+    const tema = 3*e1 - 3*e2 + e3;
+    // project one step forward using TEMA velocity
+    const prevE1 = (sl[sl.length-1] - e1) / k + e1;  // approximate prev EMA
+    return tema + (tema - prevE1);
+  }
+
+  // ── Model 3: Holt Double Exponential Smoothing (trend-aware) ─────────
+  function _qppHolt(sl) {
+    const alpha = 0.5, beta = 0.3;
+    let s = sl[0], b = sl[1] - sl[0];
+    for (let i = 1; i < sl.length; i++) {
+      const prevS = s;
+      s = alpha * sl[i] + (1 - alpha) * (s + b);
+      b = beta  * (s - prevS) + (1 - beta) * b;
+    }
+    return s + b;  // one-step-ahead forecast
+  }
+
+  // ── Model 4: Momentum-Velocity Extrapolation ──────────────────────────
+  // Fits a quadratic to the last 5 ticks: p(x) = a*x² + b*x + c
+  // Extrapolates to x=n (one step ahead). Captures curvature (acceleration).
+  function _qppMom(sl) {
+    const n = sl.length;
+    if (n < 3) return sl[n-1];
+    // 3-point quadratic fit using last 3 points (x=n-3, n-2, n-1)
+    const x0=n-3, x1=n-2, x2=n-1;
+    const y0=sl[n-3], y1=sl[n-2], y2=sl[n-1];
+    // Lagrange interpolation → evaluate at x=n
+    const a = ((y2-y0)/(x2-x0) - (y1-y0)/(x1-x0)) / (x2-x1);
+    const b = (y1-y0)/(x1-x0) - a*(x0+x1);
+    const c = y0 - a*x0*x0 - b*x0;
+    return a*n*n + b*n + c;
+  }
+
+  // ── QPP ensemble: inverse-error weighted average of 4 models ──────────
+  function predictClosePrice(prices, n) {
+    n = n || 8;
+    const len = prices.length;
+    if (len < 2) return prices[len-1] || 0;
+    const sl = prices.slice(-Math.min(n, len));
+    if (sl.length < 2) return sl[sl.length-1];
+
+    const p_wlr  = _qppWLR(sl);
+    const p_tema = _qppTEMA(sl);
+    const p_holt = _qppHolt(sl);
+    const p_mom  = _qppMom(sl);
+
+    // Inverse-error weights: model with lower recent error gets more weight
+    const w_wlr  = 1 / (_qppErr.wlr  + 1e-9);
+    const w_tema = 1 / (_qppErr.ema3  + 1e-9);
+    const w_holt = 1 / (_qppErr.holt  + 1e-9);
+    const w_mom  = 1 / (_qppErr.mom   + 1e-9);
+    const wSum   = w_wlr + w_tema + w_holt + w_mom;
+
+    const pred = (p_wlr*w_wlr + p_tema*w_tema + p_holt*w_holt + p_mom*w_mom) / wSum;
+
+    // Sanity clamp: prediction must be within 0.5% of current price
+    const cur   = prices[len-1];
+    const limit = cur * 0.005;
+    return Math.max(cur - limit, Math.min(cur + limit, pred));
+  }
+
+  // ── Update model errors when real close arrives ───────────────────────
+  function _qppUpdateErrors(prices, realClose) {
+    if (!prices || prices.length < 2) return;
+    const sl = prices.slice(-8);
+    const e = (m) => Math.abs(m - realClose) / (Math.abs(realClose) || 1);
+    _qppErr.wlr  = _qppK * e(_qppWLR(sl))  + (1-_qppK) * _qppErr.wlr;
+    _qppErr.ema3 = _qppK * e(_qppTEMA(sl)) + (1-_qppK) * _qppErr.ema3;
+    _qppErr.holt = _qppK * e(_qppHolt(sl)) + (1-_qppK) * _qppErr.holt;
+    _qppErr.mom  = _qppK * e(_qppMom(sl))  + (1-_qppK) * _qppErr.mom;
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -2379,14 +2463,33 @@
     _phantomTradeFlag = false;
   }
 
-  // ── V13 UI: purple flash when phantom fires ───────────────────────────
+  // ── V13.1 UI: Quantum Phantom Glow — directional color + layered pulse ─
+  // UP   → emerald green   (#00ff88)  — pulsing upward float animation
+  // DOWN → crimson red     (#ff2244)  — pulsing downward sink animation
+  // weight 1.3-1.5 → OVERDRIVE mode: triple-layer corona + shake
+  let _phantomGlowTimer = null;
   function _flashPhantomUI(isBullish, price) {
     try {
-      let el = W.document.getElementById('pb-phantom-flash');
+      const el = W.document.getElementById('pb-phantom-flash');
       if (!el) return;
-      el.textContent = (isBullish ? '👻↑ ' : '👻↓ ') + price.toFixed(5);
-      el.className   = 'pb-phantom-active';
-      setTimeout(() => { if (el) el.className = ''; }, 700);
+      if (_phantomGlowTimer) { clearTimeout(_phantomGlowTimer); _phantomGlowTimer = null; }
+
+      const w        = _phantomWeight;
+      const overdrive = w >= 1.3;   // weight high enough for overdrive mode
+      const dir      = isBullish ? 'bull' : 'bear';
+      const arrow    = isBullish ? '▲' : '▼';
+      const priceFmt = price.toFixed(5);
+
+      // pick CSS class: overdrive gets extra corona class
+      const cls = 'pb-ph-' + dir + (overdrive ? ' pb-ph-od' : '');
+      el.textContent = arrow + ' ' + priceFmt;
+      el.className   = cls;
+
+      // hold the glow for 3 full seconds (not just 700ms)
+      _phantomGlowTimer = setTimeout(() => {
+        if (el) el.className = '';
+        _phantomGlowTimer = null;
+      }, 3000);
     } catch(_) {}
   }
 
@@ -5185,21 +5288,100 @@
     #pb-arrow-dn.pba-soft { color:rgba(255,55,85,0.75);  opacity:0.85; animation:pb-arr-dn-soft 1.1s ease-in-out infinite; }
     #pb-arrow-dn.pba-fire { color:#ff6680; opacity:1;    animation:pb-arr-dn-fire 0.45s ease-in-out infinite; }
 
-    /* ── V13: Phantom Flash indicator ── */
+    /* ══════════════════════════════════════════════════════════
+       V13.1 — QUANTUM PHANTOM GLOW — directional + overdrive
+       ══════════════════════════════════════════════════════════ */
     #pb-phantom-flash {
-      display:inline-block; font-size:11px; font-weight:700;
-      color:transparent; letter-spacing:0.5px;
-      pointer-events:none; transition:color 0.08s;
+      display:inline-block; font-size:15px; font-weight:900;
+      color:transparent; letter-spacing:1px; margin-left:4px;
+      pointer-events:none; will-change:transform,opacity,text-shadow;
+      transition:color 0.05s, text-shadow 0.05s;
     }
-    #pb-phantom-flash.pb-phantom-active {
-      color:#cc44ff;
-      text-shadow:0 0 10px #cc44ff, 0 0 22px #8800ff, 0 0 38px #cc88ff;
-      animation:pb-phantom-pulse 0.7s ease-out forwards;
+
+    /* ── BULLISH: emerald cascade ── */
+    #pb-phantom-flash.pb-ph-bull {
+      color:#00ff88;
+      text-shadow:
+        0 0  8px #00ff88,
+        0 0 18px #00d264,
+        0 0 32px #00ff88,
+        0 0 55px rgba(0,255,136,0.55),
+        0 0 90px rgba(0,255,136,0.25);
+      animation: pb-ph-bull-rise 3s ease-in-out forwards;
     }
-    @keyframes pb-phantom-pulse {
-      0%   { transform:scale(1.5); opacity:1; }
-      60%  { transform:scale(1.1); opacity:0.9; }
-      100% { transform:scale(1.0); opacity:0; }
+    @keyframes pb-ph-bull-rise {
+      0%   { transform:translateY(0)   scale(1.6); opacity:1; }
+      15%  { transform:translateY(-6px) scale(1.4);
+             text-shadow: 0 0 12px #00ff88, 0 0 28px #00ff88,
+                          0 0 52px #00d264, 0 0 90px rgba(0,255,136,0.7),
+                          0 0 140px rgba(0,255,136,0.35); }
+      50%  { transform:translateY(-3px) scale(1.2); opacity:0.95; }
+      85%  { transform:translateY(-1px) scale(1.05); opacity:0.7; }
+      100% { transform:translateY(0)   scale(1.0);  opacity:0; }
+    }
+
+    /* ── BEARISH: crimson cascade ── */
+    #pb-phantom-flash.pb-ph-bear {
+      color:#ff2244;
+      text-shadow:
+        0 0  8px #ff2244,
+        0 0 18px #cc0022,
+        0 0 32px #ff2244,
+        0 0 55px rgba(255,34,68,0.55),
+        0 0 90px rgba(255,34,68,0.25);
+      animation: pb-ph-bear-sink 3s ease-in-out forwards;
+    }
+    @keyframes pb-ph-bear-sink {
+      0%   { transform:translateY(0)  scale(1.6); opacity:1; }
+      15%  { transform:translateY(6px) scale(1.4);
+             text-shadow: 0 0 12px #ff2244, 0 0 28px #ff2244,
+                          0 0 52px #cc0022, 0 0 90px rgba(255,34,68,0.7),
+                          0 0 140px rgba(255,34,68,0.35); }
+      50%  { transform:translateY(3px) scale(1.2); opacity:0.95; }
+      85%  { transform:translateY(1px) scale(1.05); opacity:0.7; }
+      100% { transform:translateY(0)  scale(1.0);  opacity:0; }
+    }
+
+    /* ── OVERDRIVE: extra corona + micro-shake (weight ≥ 1.3) ── */
+    #pb-phantom-flash.pb-ph-od {
+      filter: brightness(1.35) saturate(1.6);
+      animation-duration: 2s !important;   /* faster pulse in overdrive */
+    }
+    #pb-phantom-flash.pb-ph-bull.pb-ph-od {
+      text-shadow:
+        0 0  6px #00ffcc, 0 0 14px #00ff88, 0 0 28px #00ff88,
+        0 0 52px #00d264, 0 0 90px rgba(0,255,136,0.8),
+        0 0 160px rgba(0,255,200,0.5), 0 0 240px rgba(0,255,136,0.2);
+      animation-name: pb-ph-bull-od;
+    }
+    @keyframes pb-ph-bull-od {
+      0%   { transform:translateY(0)    scale(1.9);  opacity:1; }
+      8%   { transform:translateY(-10px) scale(1.6);
+             text-shadow: 0 0 20px #00ffcc, 0 0 50px #00ff88,
+                          0 0 100px #00d264, 0 0 180px rgba(0,255,200,0.9),
+                          0 0 280px rgba(0,255,136,0.4); }
+      20%  { transform:translateY(-7px) scale(1.35); }
+      40%  { transform:translateY(-4px) scale(1.2);  opacity:0.95; }
+      70%  { transform:translateY(-2px) scale(1.1);  opacity:0.75; }
+      100% { transform:translateY(0)    scale(1.0);  opacity:0; }
+    }
+    #pb-phantom-flash.pb-ph-bear.pb-ph-od {
+      text-shadow:
+        0 0  6px #ff6688, 0 0 14px #ff2244, 0 0 28px #ff2244,
+        0 0 52px #cc0022, 0 0 90px rgba(255,34,68,0.8),
+        0 0 160px rgba(255,0,50,0.5), 0 0 240px rgba(255,34,68,0.2);
+      animation-name: pb-ph-bear-od;
+    }
+    @keyframes pb-ph-bear-od {
+      0%   { transform:translateY(0)   scale(1.9);  opacity:1; }
+      8%   { transform:translateY(10px) scale(1.6);
+             text-shadow: 0 0 20px #ff6688, 0 0 50px #ff2244,
+                          0 0 100px #cc0022, 0 0 180px rgba(255,34,68,0.9),
+                          0 0 280px rgba(255,0,50,0.4); }
+      20%  { transform:translateY(7px) scale(1.35); }
+      40%  { transform:translateY(4px) scale(1.2);  opacity:0.95; }
+      70%  { transform:translateY(2px) scale(1.1);  opacity:0.75; }
+      100% { transform:translateY(0)   scale(1.0);  opacity:0; }
     }
 
     @keyframes cb-btn-glow-buy  {
