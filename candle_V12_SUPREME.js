@@ -4480,6 +4480,19 @@
       dirEl.style.color=colors[st.direction]||'#ffb020';
     }
 
+    // ── السهمان المتوهجان: تنبؤ مبكر ≥55% قبل الحدث بـ~5 ثوانٍ ──────
+    const arrowUp = W.document.getElementById('pb-arrow-up');
+    const arrowDn = W.document.getElementById('pb-arrow-dn');
+    if (arrowUp && arrowDn) {
+      arrowUp.className = '';
+      arrowDn.className = '';
+      if (st.direction === 'BUY') {
+        arrowUp.className = spConf >= 70 ? 'pba-fire' : spConf >= 55 ? 'pba-soft' : '';
+      } else if (st.direction === 'SELL') {
+        arrowDn.className = spConf >= 70 ? 'pba-fire' : spConf >= 55 ? 'pba-soft' : '';
+      }
+    }
+
     // ── [SUPREME] مقياس الثقة مع اللون التكيفي ────────────────────────
     const confGaugeEl = W.document.getElementById('pb-conf-gauge');
     const confTextEl  = W.document.getElementById('pb-conf-text');
@@ -4680,6 +4693,36 @@
     @keyframes pb-pulse-buy  { 0%,100%{box-shadow:0 0 0 0 rgba(0,210,100,0.7);}50%{box-shadow:0 0 0 12px rgba(0,210,100,0);} }
     @keyframes pb-pulse-sell { 0%,100%{box-shadow:0 0 0 0 rgba(255,55,85,0.7);} 50%{box-shadow:0 0 0 12px rgba(255,55,85,0);}  }
     @keyframes pb-dir-flash  { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
+    @keyframes pb-arr-up-soft {
+      0%,100%{ text-shadow:0 0 8px rgba(0,210,100,0.5); transform:translateY(0) scale(1); }
+      50%    { text-shadow:0 0 22px rgba(0,210,100,0.9),0 0 40px rgba(0,210,100,0.4); transform:translateY(-3px) scale(1.08); }
+    }
+    @keyframes pb-arr-up-fire {
+      0%,100%{ text-shadow:0 0 16px #00d264,0 0 32px rgba(0,210,100,0.7),0 0 64px rgba(0,210,100,0.3); transform:translateY(-2px) scale(1.12); }
+      50%    { text-shadow:0 0 30px #00ff88,0 0 60px rgba(0,255,136,0.9),0 0 100px rgba(0,210,100,0.5); transform:translateY(-6px) scale(1.25); }
+    }
+    @keyframes pb-arr-dn-soft {
+      0%,100%{ text-shadow:0 0 8px rgba(255,55,85,0.5); transform:translateY(0) scale(1); }
+      50%    { text-shadow:0 0 22px rgba(255,55,85,0.9),0 0 40px rgba(255,55,85,0.4); transform:translateY(3px) scale(1.08); }
+    }
+    @keyframes pb-arr-dn-fire {
+      0%,100%{ text-shadow:0 0 16px #ff3755,0 0 32px rgba(255,55,85,0.7),0 0 64px rgba(255,55,85,0.3); transform:translateY(2px) scale(1.12); }
+      50%    { text-shadow:0 0 30px #ff6680,0 0 60px rgba(255,102,128,0.9),0 0 100px rgba(255,55,85,0.5); transform:translateY(6px) scale(1.25); }
+    }
+    #pb-arrows {
+      display:flex; justify-content:space-between; align-items:center;
+      padding:2px 4px 6px; margin-bottom:2px;
+    }
+    #pb-arrow-up, #pb-arrow-dn {
+      font-size:40px; line-height:1; cursor:default;
+      transition:color 0.3s, opacity 0.4s, text-shadow 0.3s;
+    }
+    #pb-arrow-up { color:rgba(0,210,100,0.12); opacity:0.25; }
+    #pb-arrow-dn { color:rgba(255,55,85,0.12);  opacity:0.25; }
+    #pb-arrow-up.pba-soft { color:rgba(0,210,100,0.75); opacity:0.85; animation:pb-arr-up-soft 1.1s ease-in-out infinite; }
+    #pb-arrow-up.pba-fire { color:#00ff88; opacity:1;    animation:pb-arr-up-fire 0.45s ease-in-out infinite; }
+    #pb-arrow-dn.pba-soft { color:rgba(255,55,85,0.75);  opacity:0.85; animation:pb-arr-dn-soft 1.1s ease-in-out infinite; }
+    #pb-arrow-dn.pba-fire { color:#ff6680; opacity:1;    animation:pb-arr-dn-fire 0.45s ease-in-out infinite; }
     @keyframes cb-btn-glow-buy  {
       0%  { box-shadow: 0 0 0 0 rgba(0,210,100,0.9), inset 0 0 0 0 rgba(0,210,100,0.2); transform: scale(1); }
       30% { box-shadow: 0 0 20px 6px rgba(0,210,100,0.7), inset 0 0 12px 0 rgba(0,210,100,0.3); transform: scale(1.04); }
@@ -4839,6 +4882,10 @@
     root.id = 'pb-root';
     root.innerHTML = `
       <div id="pb-bar">
+        <div id="pb-arrows">
+          <span id="pb-arrow-up">▲</span>
+          <span id="pb-arrow-dn">▼</span>
+        </div>
         <div id="pb-header">
           <span id="pb-title">🔥 SUPREME-PRED v2 V12</span>
           <span id="pb-direction">◆ NEUTRAL</span>
