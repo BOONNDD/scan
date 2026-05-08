@@ -433,6 +433,9 @@
   let _magnetPulse2Active = false;
   let _magnetPulse3Active = false;
 
+  // ── Ghost Execution: pre-serialized packet cache (LEVEL-ZERO OVERRIDE) ─
+  let _ghostExecPacket = null;  // { signal, packet, builtAt }
+
   let _readySignal    = null;
   let _readySignalTs  = 0;
   let lastTradeTime   = 0;
@@ -2768,10 +2771,15 @@
 
     let success = false;
 
-    // ✅ محاولة WS أولاً
+    // ✅ محاولة WS أولاً — Ghost Execution: fire pre-serialized packet for sub-1ms latency
     if (tradeWSOrig && tradeWS && tradeWS.readyState === 1) {
       try {
-        const packet = _getCachedPayload(direction, overrideAmount);
+        const nowPf2 = W.performance?.now?.() ?? Date.now();
+        const ghostOk = !overrideAmount && _ghostExecPacket &&
+                        _ghostExecPacket.signal === direction &&
+                        nowPf2 - _ghostExecPacket.builtAt < 2500;
+        const packet = ghostOk ? _ghostExecPacket.packet : _getCachedPayload(direction, overrideAmount);
+        _ghostExecPacket = null;
         tradeWSOrig(packet);
         success = true;
         PERF.mark('orderSent'); PERF.report();
@@ -4394,6 +4402,19 @@
     ps.direction  = direction;
     ps.confidence = spConf / 100;
     ps.spConf     = spConf;
+
+    // ── Ghost Execution: pre-serialize payload when approaching 70% gate ─
+    if (spConf >= 55 && direction !== 'NEUTRAL') {
+      const nowPf = W.performance?.now?.() ?? Date.now();
+      if (!_ghostExecPacket || _ghostExecPacket.signal !== direction ||
+          nowPf - _ghostExecPacket.builtAt > 2500) {
+        try {
+          _ghostExecPacket = { signal: direction, packet: _getCachedPayload(direction), builtAt: nowPf };
+        } catch(_) {}
+      }
+    } else {
+      _ghostExecPacket = null;
+    }
 
     // حفظ scores الخوارزميات للتعلم التكيفي
     const allScores = {};
