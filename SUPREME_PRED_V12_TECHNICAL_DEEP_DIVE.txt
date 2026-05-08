@@ -1,0 +1,1050 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║        SUPREME-PRED V12 — الشرح التقني الكامل بالتفصيل الممل              ║
+║        للاستخدام مع أي AI لمزيد من التحليل                                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+الملف: candle_V12_SUPREME.js
+النوع: Tampermonkey UserScript (JavaScript)
+الحجم: ~5000+ سطر
+الفرع: claude/supreme-pred-v2-engine-UiUx4
+المستهدف: pocketoption.com و *.pocketoption.com و m.pocketoption.com
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الأول: البنية العامة للكود
+════════════════════════════════════════════════════════════════════════════════
+
+السكريبت مُغلّف بالكامل داخل دالة IIFE (Immediately Invoked Function Expression)
+لمنع تلوث الـ global scope:
+
+  (function() {
+    'use strict';
+    const W = window;
+    // ... كل الكود هنا
+  })();
+
+المتغير W = window يُستخدم في كل مكان بدلاً من window مباشرةً
+للتحايل على Proxy filters في بعض بيئات Tampermonkey.
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الثاني: الإعدادات (CFG) — كل معامل وقيمته
+════════════════════════════════════════════════════════════════════════════════
+
+الكائن CFG (السطر ~100 تقريباً) يحتوي على كل إعدادات البوت:
+
+  ─── إعدادات الشمعة الأساسية ───
+  MIN_TICKS_PER_CANDLE    : 2        // أقل عدد تيكات لاعتبار الشمعة صالحة
+  MIN_CANDLES_TO_TRADE    : 5        // أقل عدد شموع قبل بدء التداول
+  MAX_CANDLES             : 300      // أقصى شموع تُخزَّن في الذاكرة
+
+  ─── مبلغ التداول الافتراضي ───
+  DEFAULT_AMOUNT          : 1        // دولار واحد افتراضياً
+
+  ─── نظام الانتظار الذكي ───
+  TRADE_COOLDOWN_MS       : 500      // أقل cooldown بالمللي ثانية
+  TRADE_COOLDOWN_RATIO    : 0.25     // 25% من طول الشمعة = cooldown حقيقي
+
+  ─── TVE: محرك سرعة التيك ───
+  TVE_ENABLED             : true
+  TVE_SIGMA_THRESHOLD     : 2.5      // إشارة TVE تحتاج انحراف 2.5σ على الأقل
+  TVE_MIN_TICKS           : 4        // أقل 4 تيكات لتفعيل TVE
+  TVE_MAX_TICKS           : 25       // نافذة TVE 25 تيك
+  TVE_PRIORITY            : true     // TVE له أولوية على كل الإشارات الأخرى
+
+  ─── SUPREME-PRED v2 ───
+  SUPREME_MIN_CONF        : 70       // الحد الأدنى للثقة لتنفيذ الصفقة (0-100%)
+  SUPREME_CANCEL_CONF     : 65       // إلغاء الإشارة إذا انخفضت الثقة دون هذا
+  SUPREME_W_GROUP_A       : 0.45     // وزن مجموعة A (ديناميكيات التيك)
+  SUPREME_W_GROUP_B       : 0.30     // وزن مجموعة B (إحصائية)
+  SUPREME_W_GROUP_C       : 0.15     // وزن مجموعة C (هيكلية)
+  SUPREME_W_GROUP_D       : 0.10     // وزن مجموعة D (شمعة)
+
+  ─── IMDB: صفقات متعددة فورية ───
+  IMDB_ENABLED            : true
+  IMDB_TIER_DOUBLE        : 70       // ≥70% → 2 صفقات في نفس اللحظة
+  IMDB_TIER_TRIPLE        : 80       // ≥80% → 3 صفقات
+  IMDB_TIER_QUAD          : 90       // ≥90% → 4 صفقات
+  IMDB_AMOUNT_MULT_2      : 1.0      // مضاعف المبلغ للصفقة الثانية
+  IMDB_AMOUNT_MULT_3      : 0.75     // مضاعف المبلغ للصفقة الثالثة
+  IMDB_AMOUNT_MULT_4      : 0.5      // مضاعف المبلغ للصفقة الرابعة
+
+  ─── Kelly Criterion ───
+  KELLY_ENABLED           : true
+  KELLY_FRACTION          : 0.5      // نصف قيمة Kelly الكاملة (محافظ)
+  KELLY_MIN               : 1        // حد أدنى للصفقة = دولار واحد
+  KELLY_MAX_PCT           : 0.05     // أقصى 5% من الرصيد في صفقة واحدة
+  KELLY_MAX_USD           : 50       // سقف مطلق 50 دولار
+
+  ─── CR15: استراتيجية الانعكاس ───
+  CR15_ENABLED            : true
+  CR15_TRADE_SEC          : 3        // مدة الصفقة 3 ثوانٍ
+  CR15_AMOUNT             : 0        // 0 = استخدم tradeAmount الافتراضي
+
+  ─── Hurst Exponent ───
+  SUPREME_HURST_TREND     : 0.60     // H > 0.60 → نظام TREND
+  SUPREME_HURST_RANGE     : 0.40     // H < 0.40 → نظام RANGE
+
+  ─── التعلم التكيفي ───
+  SUPREME_LEARN_RATE      : 0.015    // معدل التعلم (محافظ)
+  SUPREME_ALGO_WEIGHT_MIN : 0.30     // الحد الأدنى لوزن أي خوارزمية
+  SUPREME_ALGO_WEIGHT_MAX : 5.00     // الحد الأقصى
+
+  ─── DSO: WebSocket Ping ───
+  DSO_WS_PING_MS          : 15000    // إرسال pong كل 15 ثانية للحفاظ على الاتصال
+
+  ─── Anti-Fingerprint Jitter ───
+  JITTER_ENABLED          : true
+  JITTER_MIN_MS           : 0
+  JITTER_MAX_MS           : 2        // تأخير عشوائي 0-2ms لمنع الكشف
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الثالث: آلية الاتصال بـ PocketOption
+════════════════════════════════════════════════════════════════════════════════
+
+─── 3.1 اعتراض WebSocket (السطور 1737-1842) ───
+
+البوت يستخدم JavaScript Proxy لاعتراض كل WebSocket جديد:
+
+  const NativeWS = W.WebSocket;           // حفظ WebSocket الأصلي
+  W.WebSocket = new Proxy(NativeWS, {
+    construct(Target, args) {
+      const ws = new Target(...args);      // إنشاء الاتصال الحقيقي
+      _attachWSHooks(ws, String(args[0])); // تعليق الـ hooks
+      return ws;
+    }
+  });
+
+─── 3.2 تحديد مقبس التداول (دالة _isTradeSocket) ───
+
+ليس كل WebSocket في الموقع هو مقبس التداول. الدالة تُمَيّز:
+
+  function _isTradeSocket(urlStr) {
+    if (urlStr.includes('po.market'))  return true;   // رابط الـ API الرئيسي
+    if (urlStr.includes('chat-po'))    return false;  // مقبس الدردشة — تجاهل
+    if (urlStr.includes('events-po'))  return false;  // مقبس الأحداث — تجاهل
+    if (urlStr.includes('socket.io') && urlStr.includes('api')) return true; // API Socket.IO
+    return false;
+  }
+
+الروابط المستهدفة تحتوي على:
+  - "po.market" ← الرابط الرئيسي لـ API PocketOption
+  - "socket.io" + "api" ← بديل Socket.IO
+
+─── 3.3 تعليق الـ Hooks على المقبس (دالة _attachWSHooks) ───
+
+عند اكتشاف مقبس التداول:
+
+  tradeWS     = ws;           // مرجع للمقبس نفسه
+  tradeWSOrig = _origSend;    // مرجع لدالة send الأصلية
+                              // يُستخدم لاحقاً لإرسال أوامر التداول
+
+  // ─ اعتراض send (الرسائل الصادرة) ─
+  ws.send = function(data) {
+    if (typeof data === 'string' && data.startsWith('42')) {
+      // رسالة Socket.IO — راقب محتواها
+      const arr = JSON.parse(data.slice(2));
+      if (arr[0] === 'changeSymbol') onActiveAsset(arr[1].asset);    // تغيير الأصل
+      if (arr[0] === 'saveCharts')   onPlatformTimeframe(arr[1]...); // تغيير الفريم
+      if (arr[0] === 'openOrder')    isDemo = arr[1].isDemo;         // تحديث وضع Demo
+    }
+    return _origSend(data); // أرسل الرسالة الحقيقية بعد المراقبة
+  };
+
+  // ─ اعتراض رسائل الاستقبال ─
+  ws.addEventListener('message', (e) => {
+    const raw = e.data;
+    if (raw === '2') { _origSend('3'); return; } // EIO4 ping → pong فوري
+    if (raw instanceof ArrayBuffer || raw instanceof Blob) handleBinaryFrame(raw...);
+    else if (typeof raw === 'string') handleTextMessage(raw, ws);
+  });
+
+  ws.addEventListener('open',  () => { wsConnected = true; });
+  ws.addEventListener('close', () => {
+    wsConnected = false;
+    tradeWS = null; tradeWSOrig = null; _tradeSocketReady = false;
+  });
+
+─── 3.4 بروتوكول الاتصال: Socket.IO + Engine.IO ───
+
+PocketOption يستخدم Socket.IO (EIO4) — بروتوكول ثنائي الطبقة:
+
+  طبقة Engine.IO (EIO4):
+    '0' → handshake (فتح الاتصال)
+    '2' → ping من السيرفر (يتوقع '3' رداً)
+    '3' → pong من الكلاينت
+    '4' → رسالة بيانات (Socket.IO مضمّنة هنا)
+
+  طبقة Socket.IO (فوق EIO4):
+    '40' → اتصال namespace
+    '42' → event (الأكثر استخداماً) = 42["eventName", {...data}]
+    '43' → ack (تأكيد استلام)
+    '45' → binary event (يسبق إطار binary)
+
+  مثال رسالة حقيقية:
+    42["openOrder",{"asset":"EURUSD","amount":1,"action":"call","isDemo":1,
+      "requestId":12345678,"optionType":100,"time":5}]
+
+─── 3.5 معالجة الرسائل الواردة ───
+
+النص (handleTextMessage):
+  - يبحث عن '42' في البداية (Socket.IO event)
+  - يُحلّل الـ payload ويُعرّف الحدث: updateStream، tick، quote، successauth...
+  - '45' + binary = إطار ثنائي مسبوق بـ event name
+
+Binary (handleBinaryFrame):
+  - يتحقق أولاً من Q1_SIG: توقيع ثنائي خاص للتيكات السريعة
+  - إذا لم يتطابق → يُجرّب msgpackDecode (بروتوكول MessagePack)
+  - يُعالج الأحداث: chafor (تغيير الفريم)، updateHistoryNewFast، tick...
+
+─── 3.6 فك تشفير MessagePack (دالة msgpackDecode) ───
+
+PocketOption يرسل بيانات السعر بتنسيق MessagePack (ثنائي مضغوط).
+البوت يحتوي على محلّل MessagePack مكتوب يدوياً (لا يستخدم مكتبة خارجية):
+
+  البايت الأول يُحدد نوع البيانات:
+  ≤ 0x7f          → Integer صغير (0-127)
+  0x80-0x8f       → Map (قاموس) صغير
+  0x90-0x9f       → Array صغير
+  0xa0-0xbf       → String صغير
+  0xca            → Float32
+  0xcb            → Float64  ← السعر يأتي هنا
+  0xcc-0xcf       → Unsigned Integer (8/16/32/64 بت)
+  0xd0-0xd3       → Signed Integer
+  0xd9-0xdb       → String (8/16/32 بت للطول)
+  0xdc-0xdd       → Array (16/32 بت للطول)
+
+─── 3.7 استخراج التيك (دالة extractTickFromArray) ───
+
+الرسالة الواردة (سواء JSON أو MessagePack) تُحوَّل لـ Array.
+دالة extractTickFromArray تفهم صيغتين:
+
+  الصيغة الأولى (nested):
+    arr[0] = ["EURUSD", 1234567890, 1.08456]
+    → asset = arr[0][0], ts = arr[0][1], price = arr[0][2]
+
+  الصيغة الثانية (flat):
+    arr = ["EURUSD", 1234567890, 1.08456]
+    → asset = arr[0], ts = arr[1], price = arr[2]
+
+─── 3.8 دورة حياة الاتصال الكاملة ───
+
+  1. الصفحة تفتح → Tampermonkey يُشغّل السكريبت
+  2. السكريبت يُبدّل window.WebSocket بـ Proxy
+  3. الموقع يفتح WS → الـ Proxy يعترضه → _attachWSHooks
+  4. الرابط يحتوي "po.market" → tradeWS = ws, tradeWSOrig = ws.send
+  5. السيرفر يرسل '0' (handshake) → Socket.IO يُتم الاتصال
+  6. السيرفر يرسل 42["successauth",...] → _tradeSocketReady = true
+  7. كل 15 ثانية → البوت يرسل '3' (pong) للحفاظ على الاتصال
+  8. السيرفر يرسل تيكات → تُمرَّر لـ onTick()
+
+─── 3.9 المصادقة ───
+
+لا يُنشئ البوت اتصالاً جديداً بـ PocketOption.
+هو يعترض اتصال الموقع الموجود. المصادقة تحدث تلقائياً:
+
+  - الموقع يرسل 42["auth",{"token":"..."}] عبر مقبسه الخاص
+  - البوت يراقب الرد 42["successauth",...] ← يعرف أن المصادقة نجحت
+  - عندها: _tradeSocketReady = true (يُفعّل التداول)
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الرابع: بناء حزمة التداول (openOrder packet)
+════════════════════════════════════════════════════════════════════════════════
+
+─── 4.1 هيكل الحزمة الكاملة ───
+
+  42["openOrder",{
+    "asset"      : "EURUSD",       // الأصل المتداول (من activeAsset)
+    "amount"     : 1,              // مبلغ الصفقة بالدولار (من tradeAmount)
+    "action"     : "call",         // call = شراء (BUY) | put = بيع (SELL)
+    "isDemo"     : 1,              // 1 = حساب تجريبي | 0 = حقيقي
+    "requestId"  : 12345678,       // معرّف فريد 32-بت (من _nextReqId)
+    "optionType" : 100,            // ثابت = 100 (Binary Option)
+    "time"       : 5               // مدة الصفقة بالثواني
+  }]
+
+─── 4.2 توليد requestId الفريد (_nextReqId) ───
+
+  function _nextReqId() {
+    // يجمع: 20 بت من microseconds + 12 بت counter
+    const perfNs   = Math.round(performance.now() * 1000) & 0xFFFFF;
+    _reqIdCounter  = (_reqIdCounter + 1) & 0xFFF;
+    return (perfNs * 4096 + _reqIdCounter) >>> 0;  // unsigned 32-bit
+  }
+
+  السبب: performance.now() يُعطي دقة sub-millisecond.
+  ضرب × 1000 → microseconds. أخذ الـ 20 بت الأقل.
+  الـ 12 بت counter يضمن uniqueness إذا بُنيت 4096 حزمة في نفس microsecond.
+  النتيجة: رقم 32-بت موجب دائماً (>>> 0 يُحوّل لـ unsigned).
+
+─── 4.3 نظام cache الحزمة (_payloadCache) ───
+
+  // الكائن المُخزَّن
+  const _payloadCache = {
+    call  : null,      // الحزمة الجاهزة لـ BUY
+    put   : null,      // الحزمة الجاهزة لـ SELL
+    asset : null,      // الأصل المُخزَّن
+    time  : 0,         // المدة المُخزَّنة
+    amount: 0,         // المبلغ المُخزَّن
+    isDemo: -1,        // وضع Demo المُخزَّن
+    prefixCall: '',    // 42["openOrder",{...,"action":"call","requestId":
+    suffixCall: '',    // ,"optionType":100,"time":5}]
+    prefixPut:  '',
+    suffixPut:  '',
+  };
+
+  // لماذا prefix/suffix؟
+  // فقط requestId يتغير في كل حزمة.
+  // بدل بناء النص كاملاً كل مرة:
+  //   الحزمة = prefix + requestId + suffix
+  //   هذا أسرع بـ ~3x من JSON.stringify + string concat كامل
+
+  // تُعاد البناء عند:
+  // - تغيير الأصل النشط (changeSymbol)
+  // - تغيير مدة الصفقة (saveCharts, chafor)
+  // - تغيير المبلغ (Kelly recompute)
+  // - تغيير Demo/Real mode
+
+─── 4.4 Ghost Execution: تجهيز الحزمة المسبق ───
+
+  // الحزمة المُجهَّزة مسبقاً
+  let _ghostExecPacket = null;  // { signal, packet, builtAt }
+
+  // كيف يعمل:
+  // 1. عند spConf >= 55% → ابنِ الحزمة الكاملة وخزّنها:
+  if (spConf >= 55 && direction !== 'NEUTRAL') {
+    const nowPf = performance.now();
+    if (!_ghostExecPacket ||
+        _ghostExecPacket.signal !== direction ||
+        nowPf - _ghostExecPacket.builtAt > 2500) {
+      _ghostExecPacket = {
+        signal  : direction,
+        packet  : _getCachedPayload(direction),  // الحزمة الكاملة بـ requestId فريد
+        builtAt : nowPf
+      };
+    }
+  } else {
+    _ghostExecPacket = null;  // أبطل إذا لم تعد الشروط متحققة
+  }
+
+  // 2. عند spConf >= 70% (لحظة التنفيذ):
+  const nowPf2 = performance.now();
+  const ghostOk = !overrideAmount &&               // لا تُستخدم مع override
+                  _ghostExecPacket &&              // موجودة
+                  _ghostExecPacket.signal === direction && // نفس الاتجاه
+                  nowPf2 - _ghostExecPacket.builtAt < 2500; // < 2.5 ثانية
+
+  const packet = ghostOk
+    ? _ghostExecPacket.packet                       // استخدم المُجهَّزة مسبقاً
+    : _getCachedPayload(direction, overrideAmount); // ابنِ الآن (fallback)
+  _ghostExecPacket = null;  // أبطل بعد الاستخدام
+  tradeWSOrig(packet);      // أرسل — استدعاء واحد فقط < 1ms
+
+  // حالات إبطال إضافية:
+  // - Kelly أعاد حساب tradeAmount → _ghostExecPacket = null (السطر 1650)
+
+─── 4.5 توقيت المنصة (snapToPOTime) ───
+
+  PO_VALID_TIMES = [5,10,15,20,25,30,45,60,90,120,180,300,600,900,1800,3600]
+
+  دالة snapToPOTime تُقرّب المدة المطلوبة لأقرب قيمة صالحة في القائمة.
+  مثال: candlePeriod=7 → snapToPOTime(7) = 10
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الخامس: تدفق بيانات التيك وبناء الشموع
+════════════════════════════════════════════════════════════════════════════════
+
+─── 5.1 مسار التيك الكامل ───
+
+  handleTextMessage OR handleBinaryFrame
+    ↓
+  extractTickFromArray(arr)  → { asset, price, ts }
+    ↓
+  onTick(asset, price, serverTs)
+    ↓
+  ┌─ تحديث currentCandles[asset]
+  ├─ NEURAL-TICK: كشف burst تيكات (> 4 في 100ms)
+  ├─ _predBarTick(asset, price, now)   ← أعلى أولوية
+  ├─ TickVelocityEngine.push(price, now)
+  └─ PatternStateMachine.evaluate(...)
+
+─── 5.2 هيكل بيانات الشمعة الجارية (currentCandles) ───
+
+  currentCandles[asset] = {
+    open     : 1.08400,    // أول سعر
+    high     : 1.08420,    // أعلى سعر
+    low      : 1.08390,    // أدنى سعر
+    prices   : [...],      // كل أسعار هذه الشمعة (مصفوفة)
+    startTime: 1234567890  // timestamp بدء الشمعة (ms)
+  }
+
+  ملاحظة: لا يوجد close مُخزَّن — آخر عنصر في prices هو close.
+
+─── 5.3 اكتشاف مدة الشمعة ───
+
+البوت يكتشف مدة الشمعة بـ 4 طرق مختلفة:
+
+  أولوية 1 — من URL params:
+    /trade?duration=5 → candlePeriod = 5, durSource = 'url'
+
+  أولوية 2 — من DOM (عناصر HTML):
+    المحددات المُجرَّبة:
+    '[class*="duration"] [class*="active"]'
+    '[class*="expiration"] [class*="selected"]'
+    '[data-name="expiration-amount"]'
+    '.js-expiration-button.active'
+    '[class*="expiry-time"] .active'
+    يُجرَّب فوراً ثم بعد 500ms ثم 1500ms
+
+  أولوية 3 — من saveCharts/updateCharts:
+    البيانات: s.fastTimeframe → candlePeriod, durSource = 'platform'
+
+  أولوية 4 — من chafor (تغيير الفريم):
+    البيانات: decoded[0][1] (seconds)
+    لها آلية lock لمنع التذبذب: يتطلب 2 قراءات متتالية متطابقة
+    أو 3 قراءات إذا المصدر الحالي موثوق
+
+  أولوية 5 — من history (تاريخ الأسعار):
+    obj.period → candlePeriod, durSource = 'history'
+
+─── 5.4 إغلاق الشمعة (closeCurrentCandle) ───
+
+  function closeCurrentCandle(asset) {
+    const cc = currentCandles[asset];
+    if (!cc || cc.prices.length < CFG.MIN_TICKS_PER_CANDLE) {
+      currentCandles[asset] = null; return;  // شمعة غير كاملة
+    }
+    const candle = buildCandle(cc.prices, cc.startTime);
+    if (!candle) { currentCandles[asset] = null; return; }
+
+    candleBuffers[asset].push(candle);
+    if (candleBuffers[asset].length > CFG.MAX_CANDLES)
+      candleBuffers[asset].shift();  // احذف الأقدم
+
+    if (asset === activeAsset) {
+      _rollingATR.addCandle(last.high, last.low, prev.close);
+      PatternStateMachine.reset();
+      TickVelocityEngine.reset();
+      _cr15Fire(candle, asset);  // ← CR15 يُطلَق هنا مباشرة
+    }
+    currentCandles[asset] = null;  // بدء شمعة جديدة
+  }
+
+─── 5.5 بناء كائن الشمعة (buildCandle) ───
+
+  function buildCandle(prices, startTime) {
+    const open  = prices[0];
+    const close = prices[prices.length - 1];
+    const high  = Math.max(...prices);
+    const low   = Math.min(...prices);
+
+    const isBullish  = close >= open;
+    const bodySize   = Math.abs(close - open);
+    const totalRange = high - low;
+    const upperWick  = isBullish ? (high - close) : (high - open);
+    const lowerWick  = isBullish ? (open - low)   : (close - low);
+
+    // خصائص محسوبة:
+    isHammer          : lowerWick >= 2× bodySize && upperWick <= bodySize/2
+    isInvertedHammer  : upperWick >= 2× bodySize && lowerWick <= bodySize/2
+    isHangingMan      : هابطة + lowerWick >= 2× bodySize
+    isShootingStar    : هابطة + upperWick >= 2× bodySize
+    isBullishMarubozu : upperWick < 5% && lowerWick < 5% من totalRange (صاعدة)
+    isBearishMarubozu : نفسه (هابطة)
+    isDoji            : bodySize < 10% من totalRange
+    isGravestoneDoji  : doji + upperWick > 70% من totalRange
+    isDragonfly       : doji + lowerWick > 70% من totalRange
+    tickCount         : prices.length  ← عدد التيكات في هذه الشمعة
+  }
+
+─── 5.6 Ring Buffer للشموع ───
+
+  الشموع تُخزَّن في Array عادي (candleBuffers[asset]).
+  الحجم محدود بـ MAX_CANDLES = 300.
+  عند الامتلاء: shift() يحذف الأقدم.
+
+  ملاحظة: حُول لاحقاً لـ Float64Array في بعض المتغيرات الداخلية:
+    _PS.tickTs    : Float64Array(10)   ← timestamps آخر 10 تيكات
+    _PS.vol_hist  : Float64Array(50)   ← تاريخ التذبذب
+    _PS.ac_velBuf : Float64Array(50)   ← buffer الارتباط الذاتي
+
+  لهذه الـ buffers: _rbPush() يُطبّق sliding window:
+    function _rbPush(buf, nRef, val) {
+      if (nRef[0] < buf.length) { buf[nRef[0]++] = val; }
+      else { buf.copyWithin(0, 1); buf[cap - 1] = val; }
+    }
+  copyWithin(0,1) أسرع من shift() لأنه لا يُنشئ ذاكرة جديدة.
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء السادس: الحالة المركزية _PS (Prediction State)
+════════════════════════════════════════════════════════════════════════════════
+
+الكائن _PS (السطر 3819) هو القلب — يحتوي كل حالة محرك التنبؤ:
+
+  ─── بيانات أساسية ───
+  tickCount  : عداد إجمالي التيكات
+  lastPrice  : آخر سعر مُعالَج
+  direction  : 'BUY' | 'SELL' | 'NEUTRAL'
+  spConf     : نتيجة SUPREME-PRED (0-100%)
+
+  ─── نوافذ الأسعار المتدحرجة ───
+  W5  : [] ← آخر 5 أسعار
+  W10 : [] ← آخر 10 أسعار
+  W20 : [] ← آخر 20 سعر
+  W40 : [] ← آخر 40 سعر
+  W80 : [] ← آخر 80 سعر
+
+  ─── سرعات وتسارعات ───
+  vels  : [] ← آخر 60 سرعة تيك (vel = Δprice/price × 100%)
+  accels: [] ← آخر 60 تسارع (accel = Δvel)
+
+  ─── EMA Stack (8 فترات) ───
+  e2, e3, e5, e8, e13, e21, e34, e55
+  معاملات الـ EMA محسوبة مسبقاً في _EK:
+    k2=2/3, k3=2/4, k5=2/6, k8=2/9, k13=2/14, k21=2/22, k34=2/35, k55=2/56
+
+  ─── Tick-RSI (Wilder) ───
+  tRsi_ag : متوسط أرباح Wilder (Smoothed MA على 14 تيك)
+  tRsi_al : متوسط خسائر Wilder
+  tRsi_val: قيمة RSI الحالية (0-100)
+  tRsi_n  : عداد للـ warm-up period
+
+  ─── Order Flow Imbalance ───
+  ofi_streak : تسلسل تيكات بنفس الاتجاه
+  ofi_score  : نقطة OFI المتراكمة
+  ofi_bid    : تقدير الطلب (كم تيك صاعد)
+  ofi_ask    : تقدير العرض (كم تيك هابط)
+
+  ─── Momentum Decay ───
+  mom   : mom = vel_new × exp(-0.693/momHL) + mom_prev × (1 - exp(-0.693/momHL))
+  momHL : half-life (يُعاير تلقائياً حسب نظام السوق)
+
+  ─── 2D Kalman State ───
+  kf2 : { x: null, v: 0, P00: 1.0, P01: 0.0, P11: 1.0 }
+    x   = تقدير الموضع (السعر)
+    v   = تقدير السرعة
+    P   = مصفوفة covariance 2×2 مُفككة (P00, P01, P11)
+
+  ─── Adaptive Weights (الأوزان المتعلَّمة) ───
+  aw: {
+    // مجموعة A
+    ofi:2.0, vel:2.5, accel:2.2, tRsi:1.8, mom:1.5,
+    zScore:1.2, entropy:0.7, ac1:1.2, ac2:0.8, ac3:0.6, ac4:0.4, ac5:0.3,
+    // مجموعة B
+    hurst:0.6, lr:1.8, kalman:2.0, roc:1.3, breakout:1.5, geo:1.0,
+    // مجموعة C
+    regime_w:1.0, dynSR:0.8, emaStack:2.0, liqVac:1.2,
+    // مجموعة D
+    candle:1.5, rsi:1.2, macd:0.9, bb:0.8, srsi:0.8, mtf:0.6, fib:0.5,
+    // TVE
+    tveAccel:2.5, tveBias:1.0,
+    // خوارزميات جديدة
+    mer:1.8, ofiDelta:2.0, permEnt:0.9, vwapDev:1.4, kf2vel:2.3, dftCycle:1.1,
+  }
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء السابع: محرك التنبؤ SUPREME-PRED v2 (_predBarTick)
+════════════════════════════════════════════════════════════════════════════════
+
+يُستدعى في كل تيك قبل أي معالجة أخرى (السطر 2067).
+
+─── 7.1 حساب السرعة والتسارع ───
+
+  vel   = (price - lastPrice) / lastPrice * 100   // نسبة التغيير %
+  accel = vel - prev_vel                           // تغيير السرعة
+
+  يُخزَّن في ps.vels (آخر 60 قيمة)
+  يُخزَّن في ps.accels (آخر 60 قيمة)
+
+─── 7.2 تحديث EMA Stack ───
+
+  e2  = e2_prev  + k2  × (price - e2_prev)
+  e3  = e3_prev  + k3  × (price - e3_prev)
+  ... وهكذا لكل الفترات الثمانية
+
+─── 7.3 حساب Tick-RSI (Wilder Smoothed) ───
+
+  if gain (vel > 0): tRsi_ag = tRsi_ag × 13/14 + vel/14
+  if loss (vel < 0): tRsi_al = tRsi_al × 13/14 + |vel|/14
+  RSI = 100 - 100/(1 + tRsi_ag/tRsi_al)
+
+─── 7.4 حساب Z-Score (محدّث — rolling window) ───
+
+  يستخدم آخر 30 سرعة من ps.vels:
+  zn  = min(vels.length, 30)
+  zm  = mean(vels[last 30])
+  zstd = std(vels[last 30])
+  zScore = (vel - zm) / zstd
+
+─── 7.5 Permutation Entropy (m=3) ───
+
+  ينظر لكل 3 سرعات متتالية → يُصنّفها في 6 أنماط ترتيبية:
+  ABC: 0<1<2, 0<2<1, 1<0<2, 1<2<0, 2<0<1, 2<1<0
+  H = -Σ(p × log2(p)) / log2(6)
+  نتيجة عالية = فوضى | منخفضة = نظام
+
+─── 7.6 Kaufman Efficiency Ratio ───
+
+  العينة: آخر 15 سرعة
+  ER = |Σvels| / Σ|vels|   (net / total)
+  قريب من 1 = اتجاه صافٍ | قريب من 0 = فوضى
+
+─── 7.7 2D Kalman Filter ───
+
+  الحالة: [x (موضع), v (سرعة)]
+  المعادلات:
+  // Predict
+  x_pred = x + v×dt
+  P00 += P11×dt² + 2×P01×dt + Q_p
+  P01 += P11×dt
+  P11 += Q_v
+  // Update
+  K0  = P00 / (P00 + R)
+  K1  = P01 / (P00 + R)
+  innov = measurement - x_pred
+  x = x_pred + K0 × innov
+  v = v_prev + K1 × innov
+  P11 -= K1 × P01
+  P01 -= K1 × P00
+  P00 -= K0 × P00
+
+  يُعطي: kf2_vScore = v / (|v| + 0.0001)  → سكور -1..+1
+
+─── 7.8 DFA Hurst Exponent ───
+
+  نافذتان: n=8 و n=16 على ps.vels
+  لكل نافذة:
+  1. احسب cumulative sum (random walk)
+  2. قسّم على windows صغيرة (4 نقاط)
+  3. لكل window: ابنِ خط regression وحسب F (fluctuation)
+  4. H = log(F) / log(4)  (DFA scaling)
+  النتيجة النهائية: متوسط الاثنتين
+
+─── 7.9 DFT Cycle Signal ───
+
+  استخدام Goertzel algorithm على آخر 32 سعر:
+  يُحسب للترددات: 1/8, 1/6, 1/4, 1/3 (من الطول)
+  يجد أعلى magnitude → الدورة السائدة
+  يُحسب الطور الحالي → BUY قرب القاع (-π/2) | SELL قرب القمة (+π/2)
+
+─── 7.10 VWAP التيك-الموزون ───
+
+  في كل تيك:
+  vwap_psum += price × volume_tick  (حجم = |vel|)
+  vwap_tsum += volume_tick
+  vwap = vwap_psum / vwap_tsum
+  vwapDev = (price - vwap) / vwap × 100  → انحراف %
+
+─── 7.11 مجموعات الخوارزميات والأوزان ───
+
+كل خوارزمية تُعطي score في [-1, +1]:
+  +1 = BUY قوي جداً
+  -1 = SELL قوي جداً
+   0 = محايد تماماً
+
+  المجموعة A (وزن 45%):
+    ofi, vel, accel, tRsi, mom, zScore, entropy,
+    ac1, ac2, ac3, ac4, ac5, tveAccel, tveBias,
+    mer (Kaufman ER), ofiDelta, permEnt, vwapDev
+
+  المجموعة B (وزن 30%):
+    hurst, lr (linear regression), kalman, roc (rate of change),
+    breakout, geo (candle geometry), kf2vel (2D Kalman velocity), dftCycle
+
+  المجموعة C (وزن 15%):
+    regime_w, dynSR (dynamic support/resistance), emaStack, liqVac
+
+  المجموعة D (وزن 10%):
+    candle, rsi, macd, bb (Bollinger), srsi, mtf (multi-timeframe), fib
+
+─── 7.12 حساب النتيجة الإجمالية ───
+
+  لكل مجموعة:
+    gA = Σ(score_i × aw[i]) / Σ(aw[i])   // weighted average
+
+  النتيجة النهائية:
+    raw = gA × 0.45 + gB × 0.30 + gC × 0.15 + gD × 0.10
+
+  تحويل لـ direction + spConf:
+    direction = raw > 0.25  → 'BUY'
+              = raw < -0.25 → 'SELL'
+              = else        → 'NEUTRAL'
+    spConf    = |raw| × 100  (0-100%)
+
+─── 7.13 فلتر نظام السوق (Regime) ───
+
+  النظام يُصنَّف بناءً على:
+  TREND   : H > 0.60 و emaStack متجانس
+  VOLATILE: ATR > 1.8× متوسط ATR الأخير
+  RANGE   : ما عدا ذلك
+
+  في نظام VOLATILE: يُشترط spConf >= 85%
+  إذا regimeBlocked[regime] = true: لا تداول (winRate < 45% بعد 20 صفقة)
+
+─── 7.14 NEURAL-TICK: Packet Spike Detection ───
+
+  يتتبع timestamps آخر 4 تيكات في Float64Array(10):
+  إذا 4 تيكات في < 100ms:
+    spikeActive = true
+    spikePenaltyUntil = now + 500ms
+    → خفّض spConf بنسبة 20% لـ 500ms
+
+  السبب: PocketOption أحياناً يرسل burst من التيكات دفعة واحدة
+  (buffered على السيرفر). هذا ليس حركة سوق حقيقية.
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الثامن: نظام تنفيذ الصفقات
+════════════════════════════════════════════════════════════════════════════════
+
+─── 8.1 Signal Watcher (الحارس) — كل 100ms ───
+
+  _v11_setInterval(() => {
+    if (!autoTrade || !_readySignal) return;
+
+    const spConf = _PS.spConf ?? 0;
+    const spDir  = _PS.direction;
+
+    // إلغاء إذا انخفضت الثقة دون CANCEL_CONF
+    if (spConf < CFG.SUPREME_CANCEL_CONF) {
+      _readySignal = null; return;
+    }
+
+    // تنفيذ إذا وصلت الثقة للحد المطلوب
+    if (spConf >= CFG.SUPREME_MIN_CONF &&
+        spDir !== 'NEUTRAL' &&
+        !tradeExec) {
+      executeTrade(spDir, _PS);
+    }
+  }, 100);
+
+─── 8.2 قفل الصفقات المزدوجة ───
+
+  tradeExec = true بعد كل صفقة
+  → كل إشارة جديدة تجد: if (tradeExec) return;
+
+  يُفكّ القفل بعد:
+    getAdaptiveCooldown() = max(500ms, candlePeriod × 25%)
+    مثال: شمعة 5ث → cooldown = max(500, 1250) = 1250ms
+    مثال: شمعة 60ث → cooldown = max(500, 15000) = 15000ms
+
+  safety net: إذا لم تأتِ نتيجة الصفقة:
+    getAdaptiveExecTimeout() = cooldown × 2.5
+    → tradeExec = false تلقائياً بعد هذه المدة
+
+─── 8.3 IMDB: صفقات متعددة فورية ───
+
+  إذا spConf >= 70%:
+    tier = spConf >= 90% ? 4 : spConf >= 80% ? 3 : 2
+    → أرسل tier صفقات بتأخير IMDB_INSTANT_DELAY_MS بين كل اثنتين
+    → المبلغ: × 1.0، × 0.75، × 0.5 للصفقات الإضافية
+
+─── 8.4 TVE: محرك سرعة التيك (إشارات فورية) ───
+
+  بدلاً من انتظار إغلاق الشمعة، TVE يُطلق إشارات في الوقت الفعلي:
+  إذا |vel| > sigma_threshold × std_vel (z-score >= 2.5):
+    → إشارة TVE فورية بدون انتظار
+
+  الأولوية: TVE_PRIORITY = true → TVE يتجاوز إشارات Pattern
+
+─── 8.5 Predictive Entry (دخول تنبؤي) ───
+
+  fastCloseAt: وقت إغلاق الشمعة القادمة (مأخوذ من saveCharts)
+  مدة قبل الإغلاق بـ PREDICTIVE_FIRE_MS (50ms):
+    → جدوِل الصفقة عبر setTimeout
+
+─── 8.6 SEE: Smart Early Entry ───
+
+  بناءً على قوة الإشارة، يُحدد كم قبل إغلاق الشمعة يدخل:
+  conf >= 4.5 → ادخل قبل 35% من طول الشمعة (max 4ث)
+  conf >= 3.0 → ادخل قبل 20%
+  conf <  3.0 → ادخل قبل 8% (قريب من الإغلاق)
+
+─── 8.7 Double Trade ───
+
+  إذا confluence >= 4.5 AND TVE يوافق AND MACD يوافق:
+    → صفقة ثانية بعد DOUBLE_DELAY_MS (800ms) بمبلغ × 1.5
+
+─── 8.8 Fallback: الضغط على زر المنصة ───
+
+  إذا فشل WS (tradeWSOrig غير متاح):
+    clickTradeButton(direction)
+    → يبحث عن زر call/put في DOM ويضغطه (querySelector + .click())
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء التاسع: التعلم التكيفي ونظام الذاكرة
+════════════════════════════════════════════════════════════════════════════════
+
+─── 9.1 دورة التعلم ───
+
+  يُستدعى عند استقبال successcloseOrder (نتيجة الصفقة):
+
+  1. تحديث winRate وStats
+  2. _supremePredLearn(won) → تحديث أوزان الخوارزميات
+  3. Kelly recompute → تحديث tradeAmount
+  4. saveStats() → حفظ الإحصائيات
+
+─── 9.2 تحديث أوزان الخوارزميات ───
+
+  لكل خوارزمية i:
+    إذا |algoScore_i| > 0.25  (الخوارزمية كان لها رأي واضح):
+      إذا فزنا:  aw[i] += 0.015
+      إذا خسرنا: aw[i] -= 0.015
+    aw[i] = clamp(aw[i], 0.30, 5.00)
+
+  المعنى: الخوارزمية التي يتطابق رأيها مع النتيجة تزداد ثقلاً.
+  الخوارزمية التي تُخطئ بانتظام تنخفض لـ 0.30 (الحد الأدنى، لا تُحذف).
+
+─── 9.3 Regime Performance ───
+
+  لكل نظام سوق (TREND/RANGE/VOLATILE):
+    regimeStats[regime].total++
+    regimeStats[regime].wins++ (إذا فزنا)
+
+  بعد 20 صفقة في النظام:
+    إذا wins/total < 0.45 → regimeBlocked[regime] = true
+    → البوت لا يتداول في هذا النظام حتى يتحسن الأداء
+
+─── 9.4 Brain Persistence (localStorage) ───
+
+  _saveBrain():
+    localStorage.setItem('sp_brain', JSON.stringify({
+      aw    : _PS.aw,              // الأوزان المتعلمة
+      stats : STATS,               // إحصائيات عامة
+      regime: _PS.regimeStats,     // أداء كل نظام
+    }))
+
+  _loadBrain():
+    const saved = JSON.parse(localStorage.getItem('sp_brain'))
+    if (saved.aw) Object.assign(_PS.aw, saved.aw)
+    ...
+
+─── 9.5 Kelly Criterion ───
+
+  computeKellyAmount(balance):
+    winRate = STATS.wins / STATS.total    (آخر 20 صفقة)
+    avgWin  = STATS.totalWinAmount / STATS.wins
+    avgLoss = STATS.totalLossAmount / STATS.losses
+
+    kelly% = (winRate × avgWin - (1-winRate) × avgLoss) / avgWin
+    amount  = balance × kelly% × KELLY_FRACTION (0.5)
+
+    clamp: max(KELLY_MIN, min(balance × KELLY_MAX_PCT, KELLY_MAX_USD, amount))
+    = max(1$, min(balance×5%, 50$, computed))
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء العاشر: استراتيجية CR15
+════════════════════════════════════════════════════════════════════════════════
+
+─── 10.1 المنطق ───
+
+  تُستدعى _cr15Fire بعد كل إغلاق شمعة (في closeCurrentCandle).
+  لا تنتظر أي حد أدنى للثقة أو فريم معين.
+
+  candle.isBullish → direction = 'SELL' → action = 'put'
+  !candle.isBullish → direction = 'BUY'  → action = 'call'
+  time = CFG.CR15_TRADE_SEC = 3 ثواني
+
+─── 10.2 شروط التنفيذ ───
+
+  CFG.CR15_ENABLED = true
+  asset === activeAsset (نفس الأصل النشط)
+  tradeWS.readyState === 1 (WS متصل)
+  now - _cr15LastFire >= (3 + 2) × 1000 = 5000ms (cooldown 5ث)
+  !tradeExec (لا توجد صفقة نشطة)
+  !_ghostTradeActive && !_recalibrating (لا إيقاف خاص)
+
+─── 10.3 الحزمة المُرسَلة ───
+
+  42["openOrder",{
+    "asset"      : asset,
+    "amount"     : amt,
+    "action"     : "call" أو "put",
+    "isDemo"     : isDemo,
+    "requestId"  : _nextReqId(),
+    "optionType" : 100,
+    "time"       : 3     ← ثابت 3 ثواني (لا يُستخدم payloadCache)
+  }]
+
+  ملاحظة: CR15 تبني الحزمة يدوياً (لا تستخدم _getCachedPayload) لأن
+  مدتها 3ث مختلفة عن مدة payloadCache (مدة الشمعة الرئيسية).
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الحادي عشر: أنظمة الحماية والفلترة
+════════════════════════════════════════════════════════════════════════════════
+
+─── 11.1 Dynamic Cooldown (تحكم الخسائر المتتالية) ───
+
+  خسارة واحدة:
+    _ghostTradeActive = true
+    البوت يُشغّل صفقة وهمية (لا يُرسل) ويراقب النتيجة
+    إذا كانت ستربح → يعود للتداول الحقيقي
+
+  3 خسائر متتالية:
+    _recalibrating = true
+    يُعلّق كل التداول حتى يعود Hurst H > 0.60
+
+─── 11.2 Loss Streak Pause ───
+
+  MAX_LOSS_STREAK (الافتراضي 3):
+  تُفرَّغ بيانات _PS (vels, accels, W5-W80, kf_x...)
+  → إعادة بناء الحالة من الصفر لتجنب "تعلم" نمط خاطئ
+
+─── 11.3 Adaptive Sigma Decay ───
+
+  بعد ADAPTIVE_SIGMA_IDLE_MS (300s) دون تداول:
+    sigma_threshold يتناقص كل 60s بـ 0.5
+    حتى يصل لـ ADAPTIVE_SIGMA_FLOOR = 1.8
+  → البوت أكثر حساسية بعد فترة طويلة من الهدوء
+
+─── 11.4 Anti-Fingerprint Jitter ───
+
+  قبل كل صفقة:
+    jitter = Math.random() × 2  (0-2ms)
+    setTimeout(execute, jitter)
+  السبب: منع نمط منتظم يمكن اكتشافه بواسطة PocketOption
+
+─── 11.5 Sub-Second Bucket ───
+
+  _subSecondBucket = floor(Date.now() / 50)
+  إذا الـ bucket الحالي = السابق → رفض الصفقة
+  → منع تنفيذ أكثر من صفقة كل 50ms
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الثاني عشر: واجهة المستخدم (UI)
+════════════════════════════════════════════════════════════════════════════════
+
+─── 12.1 الأسهم المتوهجة ───
+
+  عنصران في الـ UI:
+    #pb-arrow-up  : السهم الصاعد ↑
+    #pb-arrow-dn  : السهم الهابط ↓
+
+  CSS classes:
+    pba-soft : توهج خفيف (spConf 55-69%)
+      text-shadow: 0 0 10px #00d264  (أخضر خفيف)
+      animation: pb-arr-up-soft 1.1s ease-in-out infinite
+
+    pba-fire : توهج كامل (spConf >= 70%)
+      text-shadow: 0 0 16px #00d264, 0 0 32px #00ff88, 0 0 48px #80ffcc
+      animation: pb-arr-up-fire 0.45s ease-in-out infinite
+      transform: translateY(-6px) scale(1.25) عند ذروة الـ keyframe
+
+  Logic:
+    direction='BUY'  → arrowUp.className  = spConf>=70?'pba-fire':spConf>=55?'pba-soft':''
+    direction='SELL' → arrowDn.className  = spConf>=70?'pba-fire':spConf>=55?'pba-soft':''
+
+─── 12.2 HUD الرئيسي ───
+
+  يعرض:
+  - السعر الحي
+  - SUPREME-PRED: اتجاه + نسبة ثقة
+  - نظام السوق (TREND/RANGE/VOLATILE)
+  - Hurst H
+  - Kalman direction (↑/↓/—)
+  - Group scores (A/B/C/D)
+  - Kelly amount
+  - Win rate آخر 20 صفقة
+  - إجمالي صفقات، ربح/خسارة
+
+─── 12.3 سجل الأحداث (Log) ───
+
+  كل حدث يُسجَّل عبر addLog(message, type, detail):
+    type: 'tick' | 'tve' | 'signal' | 'info' | 'error'
+  يُعرض آخر N رسالة في اللوحة.
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الثالث عشر: أداء النظام (PERF)
+════════════════════════════════════════════════════════════════════════════════
+
+  كائن PERF يقيس التأخيرات:
+  PERF.mark('packetRecv')  → عند استقبال إطار WS
+  PERF.mark('tickRecv')    → عند استخراج التيك
+  PERF.mark('orderSent')   → عند إرسال الأمر
+
+  يُحسب:
+    tick latency  = tickRecv - packetRecv   (وقت فك التشفير)
+    total latency = orderSent - packetRecv  (من الاستقبال للإرسال)
+
+  Ghost Execution يُقلل total latency من ~2ms إلى < 1ms.
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الرابع عشر: تدفق البيانات الكامل من بداية التيك لإرسال الأمر
+════════════════════════════════════════════════════════════════════════════════
+
+  t=0ms    : SيرVR يُرسل إطار WS (text أو binary)
+  t=0.1ms  : PERF.mark('packetRecv')
+  t=0.2ms  : handleTextMessage/handleBinaryFrame
+  t=0.5ms  : msgpackDecode (إذا binary)
+  t=0.6ms  : extractTickFromArray → { asset, price, ts }
+  t=0.7ms  : PERF.mark('tickRecv')
+  t=0.8ms  : onTick() → currentCandles تحديث
+  t=0.9ms  : NEURAL-TICK: فحص burst
+  t=1.0ms  : _predBarTick() → vel, accel, EMA, RSI, Kalman...
+  t=1.5ms  : تحديث spConf و direction في _PS
+  t=1.6ms  : Ghost: إذا spConf >= 55% → بنِ _ghostExecPacket
+  t=2.0ms  : Signal Watcher poll (كل 100ms يتحقق)
+             إذا spConf >= 70% → executeTrade()
+  t=2.1ms  : Ghost Execution: packet جاهز مسبقاً
+  t=2.15ms : tradeWSOrig(packet) → إرسال فوري
+  t=2.2ms  : PERF.mark('orderSent')
+  t=2.3ms  : UI update: log + HUD + arrows
+
+  الفرق الحقيقي مع Ghost Execution:
+    بدون Ghost: من t=2.0ms يحتاج بناء الحزمة (~1-2ms إضافية)
+    مع Ghost   : الحزمة جاهزة → إرسال فوري في < 0.1ms
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء الخامس عشر: القيم الافتراضية لكل الأوزان (لحظة الإقلاع قبل التعلم)
+════════════════════════════════════════════════════════════════════════════════
+
+  ─── مجموعة A (أعلى أولوية) ───
+  vel      : 2.5  | accel    : 2.2  | tRsi    : 1.8
+  ofi      : 2.0  | mom      : 1.5  | zScore  : 1.2
+  ac1      : 1.2  | ac2      : 0.8  | ac3     : 0.6
+  ac4      : 0.4  | ac5      : 0.3  | entropy : 0.7
+  tveAccel : 2.5  | tveBias  : 1.0  | mer     : 1.8
+  ofiDelta : 2.0  | permEnt  : 0.9  | vwapDev : 1.4
+
+  ─── مجموعة B ───
+  kalman   : 2.0  | kf2vel   : 2.3  | lr      : 1.8
+  roc      : 1.3  | breakout : 1.5  | geo     : 1.0
+  hurst    : 0.6  | dftCycle : 1.1
+
+  ─── مجموعة C ───
+  emaStack : 2.0  | regime_w : 1.0  | liqVac  : 1.2
+  dynSR    : 0.8
+
+  ─── مجموعة D ───
+  candle   : 1.5  | rsi      : 1.2  | macd    : 0.9
+  bb       : 0.8  | srsi     : 0.8  | mtf     : 0.6
+  fib      : 0.5
+
+════════════════════════════════════════════════════════════════════════════════
+الجزء السادس عشر: نقاط الدخول الرئيسية (Entry Points) للتحليل
+════════════════════════════════════════════════════════════════════════════════
+
+  السطر  100  : CFG (كل الإعدادات)
+  السطر  312  : _nextReqId() (توليد معرف الطلب)
+  السطر  485  : _payloadCache (كاش الحزمة)
+  السطر  503  : _getCachedPayload() (بناء الحزمة)
+  السطر  442  : _ghostExecPacket (Ghost Execution state)
+  السطر 1566  : _supremePredLearn() (التعلم التكيفي)
+  السطر 1663  : msgpackDecode() (فك تشفير MessagePack)
+  السطر 1706  : extractTickFromArray() (استخراج التيك)
+  السطر 1739  : _isTradeSocket() (تمييز مقبس التداول)
+  السطر 1747  : _attachWSHooks() (تعليق الـ Hooks)
+  السطر 1833  : W.WebSocket = Proxy (الاعتراض الرئيسي)
+  السطر 1847  : handleBinaryFrame() (معالجة الإطارات الثنائية)
+  السطر 1900  : handleTextMessage() (معالجة الرسائل النصية)
+  السطر 2030  : onTick() (معالج التيك الرئيسي)
+  السطر 2217  : closeCurrentCandle() (إغلاق الشمعة)
+  السطر 2248  : _cr15Fire() (استراتيجية CR15)
+  السطر 2300  : buildCandle() (بناء كائن الشمعة)
+  السطر 2846  : executeTrade() — WS path (تنفيذ الصفقة)
+  السطر 2897  : _startSignalWatcher() (الحارس كل 100ms)
+  السطر 3819  : _PS (الحالة المركزية الكاملة)
+
+════════════════════════════════════════════════════════════════════════════════
+ الملف: SUPREME_PRED_V12_TECHNICAL_DEEP_DIVE.txt
+ تاريخ الإنشاء: 2026-05-08
+ الفرع: claude/supreme-pred-v2-engine-UiUx4
+ المستودع: boonndd/scan
+════════════════════════════════════════════════════════════════════════════════
