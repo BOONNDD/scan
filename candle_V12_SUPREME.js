@@ -452,6 +452,8 @@
   let   _phantomTriggerTs  = 0;          // when the phantom was fired (for delta logging)
   let   _phantomTradeFlag  = false;      // true while executeTrade is called from phantom path
   let   _lastTradeWasPhantom = false;    // persists after executeTrade for learning discount
+  // TVE context flag — persists through _readySignal=null so H5 gets correct threshold
+  let   _pendingIsTVE      = false;
 
   let _readySignal    = null;
   let _readySignalTs  = 0;
@@ -2183,6 +2185,7 @@
       addLog('[TVE⚡v10.5] '+result.reason+' | '+(result.case==='TVE-Streak'?'streak×'+CFG.TVE_STREAK_MIN:'σ='+Math.abs(result.sigma||0).toFixed(2)), 'signal');
       updateSignalDisplay(_readySignal);
       // تنفيذ فوري — Signal Watcher سيتولى أيضاً كطبقة ثانية
+      _pendingIsTVE = true;  // يُحفظ قبل المسح حتى يصل H5 بالعتبة الصحيحة
       _executeWithJitter(result.signal, asset);
       return;
     }
@@ -2711,8 +2714,9 @@
         if (curPrice!==null && Math.abs(curPrice-_signalPrice)>_tickSize*CFG.SLIPPAGE_TICKS) { addLog('🚫 [Q-7] انزلاق','error'); _readySignal=null; return; }
       }
       PERF.mark('orderSent');
-      const _sig = _readySignal.signal;  // احفظ قبل المسح
-      _readySignal = null;  // ✅ v10.10.2: امسح قبل التنفيذ — يمنع الإطلاق المزدوج
+      const _sig     = _readySignal.signal;
+      _pendingIsTVE  = _readySignal?.isTVE === true;  // احفظ قبل المسح
+      _readySignal   = null;  // ✅ v10.10.2: امسح قبل التنفيذ — يمنع الإطلاق المزدوج
       executeTrade(_sig, a);
       PERF.report();
     });
@@ -3048,11 +3052,13 @@
     const _regime = _PS.snap?.regime ?? 'RANGE';
     const _regBlocked = _PS.regimeBlocked?.[_regime] ?? false;
 
-    // TVE يحمل 3+ تيكات متتالية — يحق له عتبة أدنى بـ 5%
-    const _isTVE = _readySignal?.isTVE === true;
+    // TVE يحمل 3+ تيكات متتالية — يحق له عتبة أدنى بـ 7%
+    // _pendingIsTVE يُحفظ في كل مسارات الاستدعاء قبل مسح _readySignal
+    const _isTVE = _pendingIsTVE === true || _readySignal?.isTVE === true;
+    _pendingIsTVE = false;  // امسح بعد القراءة
     const _minConfThreshold = _regime === 'VOLATILE'
       ? CFG.SUPREME_VOLATILE_THRESH
-      : (_isTVE ? Math.max(65, CFG.SUPREME_MIN_CONF - 5) : CFG.SUPREME_MIN_CONF);
+      : (_isTVE ? Math.max(63, CFG.SUPREME_MIN_CONF - 7) : CFG.SUPREME_MIN_CONF);
 
     const _supremeOk = (_spDir === direction || _spDir === 'NEUTRAL')
                        && _spConf >= _minConfThreshold
@@ -3261,13 +3267,14 @@
       const _wIsTVE = _readySignal?.isTVE === true;
       const _minConf = _regime === 'VOLATILE'
         ? CFG.SUPREME_VOLATILE_THRESH
-        : (_wIsTVE ? Math.max(65, CFG.SUPREME_MIN_CONF - 5) : CFG.SUPREME_MIN_CONF);
+        : (_wIsTVE ? Math.max(63, CFG.SUPREME_MIN_CONF - 7) : CFG.SUPREME_MIN_CONF);
       if (_spConfNow < _minConf) {
         addLog('[WATCH] 🔴 ثقة غير كافية ' + _spConfNow + '% < ' + _minConf + '% — إلغاء', 'error');
         _readySignal = null; return;
       }
 
       addLog('[WATCH⚡] SUPREME: ' + _spConfNow + '% | تنفيذ: ' + dir, 'signal');
+      _pendingIsTVE = _readySignal?.isTVE === true;  // احفظ قبل المسح
       _readySignal = null;
       executeTrade(dir, a);
     }, CFG.SIGNAL_WATCHER_MS);
@@ -3307,7 +3314,7 @@
     const _immIsTVE = _readySignal?.isTVE === true;
     const _immMin   = _immRegime === 'VOLATILE'
       ? CFG.SUPREME_VOLATILE_THRESH
-      : (_immIsTVE ? Math.max(65, CFG.SUPREME_MIN_CONF - 5) : CFG.SUPREME_MIN_CONF);
+      : (_immIsTVE ? Math.max(63, CFG.SUPREME_MIN_CONF - 7) : CFG.SUPREME_MIN_CONF);
     if (_immSpConf < CFG.SUPREME_CANCEL_CONF) {
       addLog('[IMM] 🚫 SUPREME-PRED ثقة سقطت ('+_immSpConf.toFixed(0)+'%) — مُلغاة', 'error');
       _readySignal = null; return;
@@ -3317,6 +3324,7 @@
       _readySignal = null; return;
     }
     addLog('[IMM⚡] تنفيذ فوري بعد رفع القفل: '+dir, 'signal');
+    _pendingIsTVE = _immIsTVE;  // احفظ قبل المسح
     _readySignal = null;  // ✅ v10.10.2: امسح قبل التنفيذ — يمنع WATCH من الإطلاق المزدوج
     executeTrade(dir, a);
   }
