@@ -1607,6 +1607,10 @@
       maybeUpdate('ac5',     scores.ac5     ?? 0);
       maybeUpdate('tveAccel',scores.tveAccel?? 0);
       maybeUpdate('tveBias', scores.tveBias ?? 0);
+      maybeUpdate('mer',     scores.mer     ?? 0);
+      maybeUpdate('ofiDelta',scores.ofiDelta?? 0);
+      maybeUpdate('permEnt', scores.permEnt ?? 0);
+      maybeUpdate('vwapDev', scores.vwapDev ?? 0);
 
       // Group B — statistical algos
       maybeUpdate('hurst',   scores.hurst   ?? 0);
@@ -1615,6 +1619,8 @@
       maybeUpdate('roc',     scores.roc     ?? 0);
       maybeUpdate('breakout',scores.breakout?? 0);
       maybeUpdate('geo',     scores.geo     ?? 0);
+      maybeUpdate('kf2vel',  scores.kf2vel  ?? 0);
+      maybeUpdate('dftCycle',scores.dftCycle?? 0);
 
       // Group C — structural algos
       maybeUpdate('regime_w',scores.regime_w?? 0);
@@ -3839,7 +3845,34 @@
       srsi:0.8, mtf:0.6, fib:0.5,
       // مؤشرات TVE
       tveAccel:2.5, tveBias:1.0,
+      // خوارزميات جديدة — Group A
+      mer:1.8, ofiDelta:2.0, permEnt:0.9, vwapDev:1.4,
+      // خوارزميات جديدة — Group B
+      kf2vel:2.3, dftCycle:1.1,
     },
+
+    // ─ 2D Kalman state [position, velocity] ──────────────
+    kf2: { x: null, v: 0, P00: 1.0, P01: 0.0, P11: 1.0 },
+    kf2_vScore: 0,    // velocity-based direction score -1..1
+
+    // ─ Market Efficiency Ratio (Kaufman ER) ───────────────
+    mer: 0,           // 0 = pure noise, 1 = perfect trend
+
+    // ─ VWAP (tick-weighted) ───────────────────────────────
+    vwap_psum: 0, vwap_tsum: 0, vwap: null,
+
+    // ─ Delta OFI (volume-weighted order flow) ─────────────
+    ofi_delta: 0,     // EMA of signed magnitude imbalance
+    ofi_dRaw:  0,
+
+    // ─ Permutation Entropy ────────────────────────────────
+    pe_score: 0,      // -1..1 (clarity × direction from PermEnt)
+
+    // ─ DFA Hurst supplement ───────────────────────────────
+    dfa_h: 0.5,       // DFA-estimated Hurst exponent
+
+    // ─ DFT Cycle signal ───────────────────────────────────
+    dft_score: 0,     // -1..1 phase signal from dominant cycle
 
     // ─ Z-Score state ───────────────────────────────────────
     zs_sum: 0, zs_sq: 0, zs_n: 0,
@@ -3991,6 +4024,117 @@
       const d = cnt*sx2 - sx*sx;
       return Math.abs(d) > 1e-20 ? (cnt*sxy - sx*sy) / d : 0;
     },
+
+    // ─ Permutation Entropy (m=3 ordinal patterns) → normalized [0,1]
+    // Near 0 = strong deterministic ordering (trend), near 1 = maximum disorder
+    permEntropy3: (buf, n) => {
+      const len = Math.min(n, buf.length);
+      if (len < 5) return 1;
+      const cnt = [0,0,0,0,0,0]; // 3! = 6 ordinal patterns
+      const total = len - 2;
+      for (let i = 0; i < total; i++) {
+        const a=buf[i], b=buf[i+1], c=buf[i+2];
+        cnt[a<=b ? (b<=c?0 : a<=c?1 : 2) : (a<=c?3 : b<=c?4 : 5)]++;
+      }
+      let H = 0;
+      for (let k = 0; k < 6; k++) {
+        if (cnt[k] > 0) { const p=cnt[k]/total; H -= p*Math.log2(p); }
+      }
+      return H / 2.58496; // divide by log2(6) to normalize
+    },
+
+    // ─ Kaufman Efficiency Ratio = |net move| / Σ|tick moves|
+    // Near 1.0 = perfect directional trend, near 0 = pure noise/chop
+    kaufmanER: (vels, n) => {
+      const len = Math.min(n, vels.length);
+      if (len < 3) return 0;
+      let net = 0, path = 0;
+      for (let i = 0; i < len; i++) { net += vels[i]; path += Math.abs(vels[i]); }
+      return path < 1e-12 ? 0 : Math.abs(net) / path;
+    },
+
+    // ─ 2D Kalman filter [position, velocity] state vector
+    // Far superior to 1D KF: tracks both position AND velocity simultaneously
+    // Returns updated state {x, v, P00, P01, P11}
+    kalman2D: (state, meas, Qp, Qv, R) => {
+      const {x, v, P00, P01, P11} = state;
+      // ── Predict (dt=1 normalized tick step)
+      const xp   = x + v;
+      const P00p = P00 + 2*P01 + P11 + Qp;
+      const P01p = P01 + P11;
+      const P11p = P11 + Qv;
+      // ── Update
+      const S  = P00p + R;
+      const K0 = P00p / S;
+      const K1 = P01p / S;
+      const y  = meas - xp;
+      return {
+        x:   xp + K0*y,
+        v:   v  + K1*y,
+        P00: (1-K0)*P00p,
+        P01: P01p*(1-K0),
+        P11: P11p - K1*P01p,
+      };
+    },
+
+    // ─ DFA (Detrended Fluctuation Analysis) Hurst exponent
+    // More robust than R/S for short, non-stationary price series
+    dfaHurst: (data, n) => {
+      const len = Math.min(n, data.length);
+      if (len < 12) return 0.5;
+      let mean = 0;
+      for (let i=0; i<len; i++) mean += data[i]; mean /= len;
+      // Build cumulative deviate series Y
+      const Y = new Float64Array(len);
+      let cum = 0;
+      for (let i=0; i<len; i++) { cum += data[i]-mean; Y[i]=cum; }
+      // Compute DFA fluctuation F(s) for several window scales
+      const scales = [4,6,8,12,16].filter(s => s*2 <= len);
+      if (scales.length < 2) return 0.5;
+      const logF = [], logS = [];
+      for (const s of scales) {
+        let fSum = 0, cnt = 0;
+        for (let st=0; st+s<=len; st+=s) {
+          let sx=0,sy=0,sxy=0,sx2=0;
+          for (let i=0;i<s;i++){sx+=i;sy+=Y[st+i];sxy+=i*Y[st+i];sx2+=i*i;}
+          const den = s*sx2-sx*sx||1;
+          const m=(s*sxy-sx*sy)/den, b=(sy-m*sx)/s;
+          let res=0;
+          for (let i=0;i<s;i++){const d=Y[st+i]-m*i-b; res+=d*d;}
+          fSum+=res/s; cnt++;
+        }
+        if (cnt>0 && fSum>0){logF.push(0.5*Math.log(fSum/cnt));logS.push(Math.log(s));}
+      }
+      if (logF.length < 2) return 0.5;
+      let xm=0,ym=0;
+      for (let i=0;i<logS.length;i++){xm+=logS[i];ym+=logF[i];}
+      xm/=logS.length; ym/=logF.length;
+      let num=0,den2=0;
+      for (let i=0;i<logS.length;i++){num+=(logS[i]-xm)*(logF[i]-ym);den2+=(logS[i]-xm)**2;}
+      return den2>1e-15 ? Math.max(0.1,Math.min(0.9,num/den2)) : 0.5;
+    },
+
+    // ─ DFT-based dominant cycle phase signal → [-1, 1]
+    // Identifies dominant oscillation frequency and returns where we are in the cycle.
+    // +1 = near cycle trough (expect rise), -1 = near cycle peak (expect fall)
+    dftCycleSignal: (prices, n) => {
+      const len = Math.min(n, prices.length);
+      if (len < 8) return 0;
+      let mean = 0;
+      for (let i=0;i<len;i++) mean+=prices[i]; mean/=len;
+      let maxPow=0, bestK=1;
+      for (let k=1; k<=Math.floor(len/2); k++) {
+        let re=0, im=0;
+        for (let t=0;t<len;t++){const a=6.28318*k*t/len; re+=(prices[t]-mean)*Math.cos(a); im+=(prices[t]-mean)*Math.sin(a);}
+        const pow=re*re+im*im;
+        if (pow>maxPow){maxPow=pow; bestK=k;}
+      }
+      let re=0, im=0;
+      for (let t=0;t<len;t++){const a=6.28318*bestK*t/len; re+=(prices[t]-mean)*Math.cos(a); im+=(prices[t]-mean)*Math.sin(a);}
+      // Phase at current end of series
+      const phase = Math.atan2(im, re) + 6.28318*bestK*(len-1)/len;
+      return -Math.cos(phase); // +1 at trough (buy), -1 at peak (sell)
+    },
   });
 
   // ══════════ [C] الدالة الرئيسية SUPREME-PRED v2 — تُستدعى على كل تيك ══
@@ -4091,17 +4235,57 @@
       }
     }
 
-    // ════ K: Z-Score للسعر الحالي (هل السعر بعيد عن المتوسط؟) ═══════
+    // ════ K: Z-Score للسرعة على نافذة متحركة (rolling window) ════════
+    // إصلاح: نستخدم ps.vels كـ rolling window بدل التراكم غير المحدود
     let zScore = 0;
     {
-      ps.zs_sum += price; ps.zs_sq += price*price; ps.zs_n++;
-      if (ps.zs_n > 40) { ps.zs_n=40; }
-      if (ps.zs_n >= 8) {
-        const m=ps.zs_sum/ps.zs_n, v=Math.sqrt(Math.max(0,ps.zs_sq/ps.zs_n-m*m))||1e-9;
-        zScore = (price-m)/v; // موجب = السعر فوق المتوسط (قد يعني تشبع شراء → بيع)
-        // في حالة ارتداد: zScore > 2 → بيع | zScore < -2 → شراء
-        // في حالة اتجاه: نعكسه — نستخدم الـ regime لتحديد التفسير
+      const zv = ps.vels, zn = Math.min(ps.vels.length, 30);
+      if (zn >= 8) {
+        let zm=0, zq=0;
+        for (let i=zv.length-zn; i<zv.length; i++){zm+=zv[i];}
+        zm /= zn;
+        for (let i=zv.length-zn; i<zv.length; i++){zq+=(zv[i]-zm)**2;}
+        const zstd = Math.sqrt(zq/zn) || 1e-9;
+        zScore = (vel - zm) / zstd; // z-score الـ velocity الحالية
       }
+    }
+
+    // ════ K2: VWAP Deviation — انحراف السعر عن المتوسط الموزون ══════
+    // نستخدم عدد التيكات كـ proxy للحجم
+    {
+      ps.vwap_psum += price; ps.vwap_tsum++;
+      if (ps.vwap_tsum > 200) {
+        // إعادة معايرة تدريجية لمنع التراكم اللانهائي
+        ps.vwap_psum *= 0.995; ps.vwap_tsum = Math.round(ps.vwap_tsum * 0.995);
+      }
+      ps.vwap = ps.vwap_psum / (ps.vwap_tsum || 1);
+    }
+
+    // ════ K3: Delta OFI المحسّن — موزون بحجم الحركة ═════════════════
+    // يزن كل تيك بحجم حركته (velocity magnitude) بدل الـ streak البسيط
+    {
+      const velMag = Math.abs(vel);
+      ps.ofi_dRaw   = ps.ofi_dRaw   * 0.90 + velDir * velMag * 10;
+      ps.ofi_delta  = ps.ofi_delta  * 0.92 + ps.ofi_dRaw    * 0.08;
+    }
+
+    // ════ K4: MER — Kaufman Efficiency Ratio ═════════════════════════
+    // يقيس نسبة الحركة الصافية لمجموع الحركات الفردية → 1=اتجاه نقي، 0=ضوضاء
+    {
+      const vn = Math.min(ps.vels.length, 20);
+      const rawER = _MATH.kaufmanER(ps.vels, vn);
+      ps.mer = ps.mer * 0.85 + rawER * 0.15; // smoothed MER
+    }
+
+    // ════ K5: Permutation Entropy — معقد من Shannon ═══════════════════
+    // يكتشف الأنماط الترتيبية في الحركة → يعطي إشارة اتجاه مع وضوح الحركة
+    {
+      const vn = Math.min(ps.vels.length, 12);
+      const pe = _MATH.permEntropy3(ps.vels, vn);
+      const peClarity = 1 - pe; // 0=فوضى, 1=نقاء تام
+      // determine directional bias from OFI direction + ER direction
+      const peBias = ps.ofi_score > 0 ? 1 : ps.ofi_score < 0 ? -1 : 0;
+      ps.pe_score = peClarity * peBias; // -1..1
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -4162,9 +4346,35 @@
       }
     }
 
-    // ── [S3] Enhanced Hurst via _MATH.hurstFromVels (4 windows: 4/8/16/32) ──
+    // ── [S2b] 2D Kalman Filter [position + velocity] ─────────────────
+    // Tracks price AND velocity simultaneously — far more predictive than 1D KF
+    let kf2velScore = 0;
+    {
+      if (ps.kf2.x === null) {
+        ps.kf2 = { x: price, v: 0, P00: 1.0, P01: 0.0, P11: 1.0 };
+      } else {
+        ps.kf2 = _MATH.kalman2D(ps.kf2, price, 1e-5, 1e-4, 0.005);
+        const velPred = ps.kf2.v;                // predicted tick velocity
+        ps.kf2_vScore = _cls(velPred / (ps.vol || 1e-9), 1);
+        kf2velScore   = ps.kf2_vScore;
+      }
+    }
+
+    // ── [S3] Enhanced Hurst: average R/S + DFA for robustness ─────────
     if (ps.vels.length >= 32) {
-      ps.hurst_h = _MATH.hurstFromVels(ps.vels);
+      const rsH  = _MATH.hurstFromVels(ps.vels);
+      const dfaH = _MATH.dfaHurst(ps.vels, Math.min(ps.vels.length, 40));
+      ps.dfa_h   = dfaH;
+      ps.hurst_h = (rsH + dfaH) * 0.5; // average of two independent estimators
+    }
+
+    // ── [S3b] DFT Dominant Cycle Phase Signal ─────────────────────────
+    // Identifies where we are in the dominant price oscillation cycle
+    {
+      const pn = Math.min(ps.W20.length, 20);
+      if (pn >= 8) {
+        ps.dft_score = _MATH.dftCycleSignal(ps.W20, pn);
+      }
     }
 
     // ── [S4] AutoCorrelation lags 1-5 ────────────────────────────────
@@ -4269,22 +4479,42 @@
       tveBias=bias==='BUY'?1:bias==='SELL'?-1:0;
     }
 
+    // ── حساب قيم الخوارزميات الجديدة ─────────────────────────────────
+    // MER: يعزز الإشارة عند الاتجاه الواضح ويخفضها عند الضوضاء
+    const merScore = _cls((ps.mer * 2 - 1) * (velAvg > 0 ? 1 : -1), 1);
+    // Delta OFI: موزون بالمقدار
+    const ofiDeltaScore = _cls(ps.ofi_delta / 3, 1);
+    // VWAP deviation: انحراف السعر عن VWAP الـ tick-weighted
+    let vwapScore = 0;
+    if (ps.vwap !== null) {
+      const vwapDev = (price - ps.vwap) / (ps.vol * 5 || 1e-9);
+      // في TREND: تابع الانحراف | في RANGE: عكسه
+      vwapScore = _cls(ps.regime === 'RANGE' ? -vwapDev : vwapDev, 1);
+    }
+    // PermEnt: الوضوح × الاتجاه
+    const permEntScore = _cls(ps.pe_score, 1);
+
     // ── مجموعة A — ديناميكيات التيك (45%) ────────────────────────────
     const groupA_algos = [
-      {key:'ofi',     val:ofiNorm,          w:aw.ofi},
-      {key:'vel',     val:velAvg,           w:aw.vel},
-      {key:'accel',   val:accelAvg,         w:aw.accel},
-      {key:'tRsi',    val:tRsiNorm,         w:aw.tRsi},
-      {key:'mom',     val:momNorm,          w:aw.mom},
-      {key:'zScore',  val:zAdj,            w:aw.zScore},
-      {key:'entropy', val:entropyAmp,       w:aw.entropy},
-      {key:'ac1',     val:ac1Amp,           w:aw.ac1},
-      {key:'ac2',     val:_cls(acLags[1],1),w:aw.ac2},
-      {key:'ac3',     val:_cls(acLags[2],1),w:aw.ac3},
-      {key:'ac4',     val:_cls(acLags[3],1),w:aw.ac4},
-      {key:'ac5',     val:_cls(acLags[4],1),w:aw.ac5},
-      {key:'tveAccel',val:tveSigma,         w:aw.tveAccel},
-      {key:'tveBias', val:tveBias,          w:aw.tveBias},
+      {key:'ofi',      val:ofiNorm,          w:aw.ofi},
+      {key:'vel',      val:velAvg,           w:aw.vel},
+      {key:'accel',    val:accelAvg,         w:aw.accel},
+      {key:'tRsi',     val:tRsiNorm,         w:aw.tRsi},
+      {key:'mom',      val:momNorm,          w:aw.mom},
+      {key:'zScore',   val:zAdj,             w:aw.zScore},
+      {key:'entropy',  val:entropyAmp,       w:aw.entropy},
+      {key:'ac1',      val:ac1Amp,           w:aw.ac1},
+      {key:'ac2',      val:_cls(acLags[1],1),w:aw.ac2},
+      {key:'ac3',      val:_cls(acLags[2],1),w:aw.ac3},
+      {key:'ac4',      val:_cls(acLags[3],1),w:aw.ac4},
+      {key:'ac5',      val:_cls(acLags[4],1),w:aw.ac5},
+      {key:'tveAccel', val:tveSigma,         w:aw.tveAccel},
+      {key:'tveBias',  val:tveBias,          w:aw.tveBias},
+      // ── New A-group algos ──
+      {key:'mer',      val:merScore,         w:aw.mer},
+      {key:'ofiDelta', val:ofiDeltaScore,    w:aw.ofiDelta},
+      {key:'permEnt',  val:permEntScore,     w:aw.permEnt},
+      {key:'vwapDev',  val:vwapScore,        w:aw.vwapDev},
     ];
 
     // ── مجموعة B — إحصائية (30%) ────────────────────────────────────
@@ -4304,12 +4534,15 @@
       return gs;
     })();
     const groupB_algos = [
-      {key:'hurst',   val:hurstScore,   w:aw.hurst},
-      {key:'lr',      val:lrFiltered,   w:aw.lr},
-      {key:'kalman',  val:kalmanScore,  w:aw.kalman},
-      {key:'roc',     val:rocConsensus, w:aw.roc},
-      {key:'breakout',val:breakoutScore,w:aw.breakout},
-      {key:'geo',     val:geoScore,     w:aw.geo},
+      {key:'hurst',    val:hurstScore,       w:aw.hurst},
+      {key:'lr',       val:lrFiltered,       w:aw.lr},
+      {key:'kalman',   val:kalmanScore,      w:aw.kalman},
+      {key:'roc',      val:rocConsensus,     w:aw.roc},
+      {key:'breakout', val:breakoutScore,    w:aw.breakout},
+      {key:'geo',      val:geoScore,         w:aw.geo},
+      // ── New B-group algos ──
+      {key:'kf2vel',   val:kf2velScore,      w:aw.kf2vel},
+      {key:'dftCycle', val:_cls(ps.dft_score,1), w:aw.dftCycle},
     ];
 
     // ── مجموعة C — هياكلية (15%) ─────────────────────────────────────
