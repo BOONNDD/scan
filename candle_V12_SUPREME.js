@@ -1593,47 +1593,50 @@
       };
 
       // Group A — micro-tick algos
-      maybeUpdate('vel',       scores.velW3  ?? 0);
-      maybeUpdate('velW8',     scores.velW8  ?? 0);
-      maybeUpdate('velW15',    scores.velW15 ?? 0);
-      maybeUpdate('tickRsi',   scores.tickRsi ?? 0);
-      maybeUpdate('ofi',       scores.ofi    ?? 0);
-      maybeUpdate('momDecay',  scores.momDecay ?? 0);
-      maybeUpdate('zscore',    scores.zscore  ?? 0);
-      maybeUpdate('entropy',   scores.entropy ?? 0);
-      maybeUpdate('autoCorr',  scores.autoCorr ?? 0);
-      maybeUpdate('tveAccel',  scores.tveAccel ?? 0);
+      maybeUpdate('vel',     scores.vel     ?? 0);
+      maybeUpdate('accel',   scores.accel   ?? 0);
+      maybeUpdate('tRsi',    scores.tRsi    ?? 0);
+      maybeUpdate('ofi',     scores.ofi     ?? 0);
+      maybeUpdate('mom',     scores.mom     ?? 0);
+      maybeUpdate('zScore',  scores.zScore  ?? 0);
+      maybeUpdate('entropy', scores.entropy ?? 0);
+      maybeUpdate('ac1',     scores.ac1     ?? 0);
+      maybeUpdate('ac2',     scores.ac2     ?? 0);
+      maybeUpdate('ac3',     scores.ac3     ?? 0);
+      maybeUpdate('ac4',     scores.ac4     ?? 0);
+      maybeUpdate('ac5',     scores.ac5     ?? 0);
+      maybeUpdate('tveAccel',scores.tveAccel?? 0);
+      maybeUpdate('tveBias', scores.tveBias ?? 0);
 
       // Group B — statistical algos
-      maybeUpdate('hurst',     scores.hurst  ?? 0);
-      maybeUpdate('lr',        scores.lr     ?? 0);
-      maybeUpdate('kalman',    scores.kalman ?? 0);
-      maybeUpdate('roc',       scores.roc    ?? 0);
-      maybeUpdate('roc25',     scores.roc25  ?? 0);
-      maybeUpdate('breakout',  scores.breakout ?? 0);
-      maybeUpdate('geometry',  scores.geometry ?? 0);
+      maybeUpdate('hurst',   scores.hurst   ?? 0);
+      maybeUpdate('lr',      scores.lr      ?? 0);
+      maybeUpdate('kalman',  scores.kalman  ?? 0);
+      maybeUpdate('roc',     scores.roc     ?? 0);
+      maybeUpdate('breakout',scores.breakout?? 0);
+      maybeUpdate('geo',     scores.geo     ?? 0);
 
       // Group C — structural algos
-      maybeUpdate('regime',    scores.regimeScore ?? 0);
-      maybeUpdate('sr',        scores.sr     ?? 0);
-      maybeUpdate('emaStack',  scores.emaStack ?? 0);
-      maybeUpdate('liqVacuum', scores.liqVacuum ?? 0);
+      maybeUpdate('regime_w',scores.regime_w?? 0);
+      maybeUpdate('dynSR',   scores.dynSR   ?? 0);
+      maybeUpdate('emaStack',scores.emaStack?? 0);
+      maybeUpdate('liqVac',  scores.liqVac  ?? 0);
 
       // Group D — candle-level algos
-      maybeUpdate('candle',    scores.candle ?? 0);
-      maybeUpdate('macd',      scores.macd   ?? 0);
-      maybeUpdate('stochRsi',  scores.stochRsi ?? 0);
-      maybeUpdate('bbPct',     scores.bbPct  ?? 0);
-      maybeUpdate('mtfBias',   scores.mtfBias ?? 0);
-      maybeUpdate('fib',       scores.fib    ?? 0);
-      maybeUpdate('patterns',  scores.patterns ?? 0);
+      maybeUpdate('candle',  scores.candle  ?? 0);
+      maybeUpdate('rsi',     scores.rsi     ?? 0);
+      maybeUpdate('macd',    scores.macd    ?? 0);
+      maybeUpdate('bb',      scores.bb      ?? 0);
+      maybeUpdate('srsi',    scores.srsi    ?? 0);
+      maybeUpdate('mtf',     scores.mtf     ?? 0);
+      maybeUpdate('fib',     scores.fib     ?? 0);
 
       _saveBrain();
     })(win);
     // 🆕 Kelly تحديث المبلغ — ✅ v10.9: لا تُعيد الضبط إذا المستخدم غيّر يدوياً
     if (CFG.KELLY_ENABLED && accountBalance && !_manualAmountOverride) {
       const newAmt = computeKellyAmount(accountBalance);
-      if (newAmt !== tradeAmount) { tradeAmount = newAmt; _rebuildPayloadCache(); _updateKellyDisplay(); }
+      if (newAmt !== tradeAmount) { tradeAmount = newAmt; _rebuildPayloadCache(); _ghostExecPacket = null; _updateKellyDisplay(); }
     } else if (_manualAmountOverride) {
       // فقط حدّث الواجهة بدون تغيير القيمة
       _updateKellyDisplay();
@@ -3763,9 +3766,6 @@
     // ─ سرعات وتسارعات التيك ────────────────────────────────
     vels  : [],  // آخر 60 سرعة تيك
     accels: [],  // آخر 60 تسارع
-    velW3 : new Float64Array(3),  velW3_n: 0,   // TypedArray ring-buffers — Group A
-    velW8 : new Float64Array(8),  velW8_n: 0,
-    velW15: new Float64Array(15), velW15_n: 0,
 
     // ─ EMA Stack — 8 فترات مختلفة (كل على حدة) ───────────
     e2:null, e3:null, e5:null, e8:null,
