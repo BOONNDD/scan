@@ -287,6 +287,12 @@
     SUPREME_KALMAN_Q        : 1e-5,  // ضجيج العملية (process noise)
     SUPREME_KALMAN_R        : 0.01,  // ضجيج القياس (measurement noise)
 
+    // ─── CR15: استراتيجية عكس الشمعة على S15 ──────────────────────────
+    CR15_ENABLED            : true,  // تفعيل استراتيجية CR15
+    CR15_PERIOD_SEC         : 15,    // الشمعة يجب أن تكون 15 ثانية
+    CR15_TRADE_SEC          : 3,     // مدة الصفقة 3 ثوانٍ
+    CR15_AMOUNT             : 0,     // 0 = استخدم tradeAmount الافتراضي
+
     // ─── نظام التعلم التكيفي ────────────────────────────────────────
     SUPREME_LEARN_RATE      : 0.015, // معدل التعلم (محافظ لتجنب التذبذب)
     SUPREME_ALGO_WEIGHT_MIN : 0.30,  // الحد الأدنى لوزن الخوارزمية
@@ -2206,6 +2212,9 @@
     if (a===activeAsset||activeAsset===null) scheduleWindowEntry(a, candlePeriod);
   }
 
+  // ── CR15: حالة استراتيجية عكس الشمعة ─────────────────────────────
+  let _cr15LastFire = 0;  // timestamp آخر إطلاق
+
   function closeCurrentCandle(asset) {
     const cc = currentCandles[asset];
     if (!cc || cc.prices.length < CFG.MIN_TICKS_PER_CANDLE) { currentCandles[asset]=null; return; }
@@ -2227,8 +2236,65 @@
         'تيكات:'+candle.tickCount+' | جسم:'+candle.bodySize.toFixed(5)+' | '+trendInfo.label+' | شموع:'+bufs.length
       );
       renderCandleRow();
+      // ── CR15: أطلق عكس الشمعة فوراً بعد الإغلاق ──────────────────
+      _cr15Fire(candle, asset);
     }
     currentCandles[asset] = null;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § CR15  استراتيجية عكس الشمعة — S15 → صفقة 3 ثوانٍ معاكسة فورية
+  // ══════════════════════════════════════════════════════════════════════
+  // المنطق: شمعة S15 صاعدة → بيع | شمعة هابطة → شراء | مدة 3ث | فوري
+  function _cr15Fire(candle, asset) {
+    if (!CFG.CR15_ENABLED) return;
+    // شرط الفريم: يجب أن تكون الشمعة 15 ثانية بالضبط
+    if (candlePeriod !== CFG.CR15_PERIOD_SEC) return;
+    if (asset !== activeAsset) return;
+    // شرط الاتصال: يجب أن يكون WebSocket متصلاً
+    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) {
+      addLog('⚠ CR15 — WebSocket غير متصل', 'error'); return;
+    }
+    // شرط الكولداون: منع التكرار في نفس الشمعة
+    const now = Date.now();
+    if (now - _cr15LastFire < (CFG.CR15_TRADE_SEC + 2) * 1000) return;
+    // شرط التنفيذ: لا تتداول أثناء صفقة نشطة
+    if (tradeExec) {
+      addLog('⚠ CR15 — صفقة نشطة، تخطي', 'info'); return;
+    }
+    // شرط الإيقاف العام
+    if (_ghostTradeActive || _recalibrating) return;
+
+    // ── الاتجاه المعاكس: صاعدة → بيع | هابطة → شراء ────────────────
+    const direction = candle.isBullish ? 'SELL' : 'BUY';
+    const action    = direction === 'BUY' ? 'call' : 'put';
+    const amt       = CFG.CR15_AMOUNT > 0 ? CFG.CR15_AMOUNT : tradeAmount;
+
+    // ── بناء الـ packet مع time=3 مباشرة (تجاوز payloadCache) ─────────
+    const reqId  = _nextReqId();
+    const packet = '42["openOrder",{"asset":"' + asset +
+                   '","amount":' + amt +
+                   ',"action":"' + action +
+                   '","isDemo":' + isDemo +
+                   ',"requestId":' + reqId +
+                   ',"optionType":100,"time":' + CFG.CR15_TRADE_SEC + '}]';
+    try {
+      tradeWSOrig(packet);
+      _cr15LastFire = now;
+      // قفل التنفيذ لمنع الصفقة المزدوجة
+      tradeExec = true;
+      updateTradeBtn();
+      // فك القفل بعد انتهاء الصفقة + 1 ثانية بافر
+      setTimeout(() => { tradeExec = false; updateTradeBtn(); }, (CFG.CR15_TRADE_SEC + 1) * 1000);
+      addLog(
+        '⚡ CR15 ' + (direction === 'BUY' ? '🟢 شراء' : '🔴 بيع') +
+        ' — عكس شمعة ' + (candle.isBullish ? 'صاعدة ↑' : 'هابطة ↓') +
+        ' | ' + CFG.CR15_TRADE_SEC + 'ث | $' + amt,
+        'signal'
+      );
+    } catch(e) {
+      addLog('❌ CR15 خطأ تنفيذ: ' + e.message, 'error');
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════
