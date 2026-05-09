@@ -44,3 +44,4 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'     // WebSocket client (more reliable than java.net.http on Android)
 }
+# Build trigger Sat May  9 14:23:16 UTC 2026
