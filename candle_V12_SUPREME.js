@@ -3014,28 +3014,28 @@
     const a = asset || activeAsset;
     if (!a) { addLog('❌ لا زوج نشط','error'); return; }
 
-    // ══ حارس 4: ✅ v10.10 FIX#2 — فلتر الاتجاه (TVE و PAT كلاهما مُحجوب في الضعيف) ══════
-    // TVE + PAT → يُحجبان في DOWN/DN_WEAK (لا BUY) وUP/UP_WEAK (لا SELL)
+    // ══ حارس 4: فلتر الاتجاه — TVE يتجاوز WEAK، PAT محجوب بالزخم ══════════
+    // TVE له تيارات تيك خاصة به — لا يُحجب في WEAK، يُحجب فقط في DOWN/UP القوي
+    // PAT في WEAK: يُحجب إلا إذا أكدت آخر 7 تيكات الاتجاه
     {
       const _trendCandles = candleBuffers[a] || [];
       if (_trendCandles.length >= 3) {
         const _trendNow  = analyzeTrend(_trendCandles);
-        const _isTVESig  = !_readySignal || _readySignal.isTVE === true;
-        // ✅ v10.10 FIX#2: PAT أيضاً مُحجوب في الضعيف — نفس منطق TVE
-        // اتجاه الضعيف يُتجاوز إذا كانت التيكات الأخيرة تؤكد الإشارة
+        const _h4IsTVE   = _pendingIsTVE === true;  // _pendingIsTVE مُعيَّن قبل الاستدعاء، لم يُمسح بعد (H5 يمسحه)
         const _tickMom   = _tickMomentumDir(a);
+        // TVE لا يُحجب في الضعيف — TVE يمتلك تأكيد تيك ذاتي (streak×3)
         const _downBlock = _trendNow.trend === 'DOWN'
-                        || (_trendNow.trend === 'DN_WEAK' && _tickMom !== 'BUY');
+                        || (!_h4IsTVE && _trendNow.trend === 'DN_WEAK' && _tickMom !== 'BUY');
         const _upBlock   = _trendNow.trend === 'UP'
-                        || (_trendNow.trend === 'UP_WEAK' && _tickMom !== 'SELL');
+                        || (!_h4IsTVE && _trendNow.trend === 'UP_WEAK' && _tickMom !== 'SELL');
         if (direction === 'BUY' && _downBlock) {
-          addLog('🚫 [H4] رُفض BUY — '+(_isTVESig?'TVE':'PAT')+' ('+_trendNow.label+')', 'error',
+          addLog('🚫 [H4] رُفض BUY — PAT ('+_trendNow.label+')', 'error',
                  'شموع:'+_trendCandles.length+' | قوة:'+_trendNow.strength+'%');
           _readySignal = null;
           return;
         }
         if (direction === 'SELL' && _upBlock) {
-          addLog('🚫 [H4] رُفض SELL — '+(_isTVESig?'TVE':'PAT')+' ('+_trendNow.label+')', 'error',
+          addLog('🚫 [H4] رُفض SELL — PAT ('+_trendNow.label+')', 'error',
                  'شموع:'+_trendCandles.length+' | قوة:'+_trendNow.strength+'%');
           _readySignal = null;
           return;
@@ -3217,10 +3217,12 @@
       }
 
       // ── [WATCH-2] إعادة تقييم SUPREME-PRED قبل التنفيذ ──────────────
-      // إذا انخفضت الثقة دون 65% → إلغاء فوري
+      // TVE عتبة الإلغاء 63% بدل 65% (نفس عتبة H5 للـ TVE)
       const _spConfNow = _PS.spConf ?? 0;
-      if (_spConfNow < CFG.SUPREME_CANCEL_CONF) {
-        addLog('[WATCH] 🔴 ثقة انخفضت ' + _spConfNow + '% < ' + CFG.SUPREME_CANCEL_CONF + '% — إلغاء', 'info');
+      const _w2IsTVE   = _readySignal?.isTVE === true;
+      const _cancelThr = _w2IsTVE ? Math.max(63, CFG.SUPREME_MIN_CONF - 7) : CFG.SUPREME_CANCEL_CONF;
+      if (_spConfNow < _cancelThr) {
+        addLog('[WATCH] 🔴 ثقة انخفضت ' + _spConfNow + '% < ' + _cancelThr + '% — إلغاء', 'info');
         _readySignal = null; return;
       }
 
@@ -3243,15 +3245,16 @@
       const a = _readySignal.asset || activeAsset;
       if (!dir || !a) return;
 
-      // ── [WATCH-4] فلتر الاتجاه (TVE+PAT) ─────────────────────────────
+      // ── [WATCH-4] فلتر الاتجاه — TVE يتجاوز WEAK ────────────────────
       const _wCandles = candleBuffers[a] || [];
       if (_wCandles.length >= 3) {
-        const _wTrend   = analyzeTrend(_wCandles);
-        const _wTickMom = _tickMomentumDir(a);
-        const _wDownBlk = _wTrend.trend === 'DOWN'
-                       || (_wTrend.trend === 'DN_WEAK' && _wTickMom !== 'BUY');
-        const _wUpBlk   = _wTrend.trend === 'UP'
-                       || (_wTrend.trend === 'UP_WEAK' && _wTickMom !== 'SELL');
+        const _wTrend    = analyzeTrend(_wCandles);
+        const _w4IsTVE   = _readySignal?.isTVE === true;
+        const _wTickMom  = _tickMomentumDir(a);
+        const _wDownBlk  = _wTrend.trend === 'DOWN'
+                        || (!_w4IsTVE && _wTrend.trend === 'DN_WEAK' && _wTickMom !== 'BUY');
+        const _wUpBlk    = _wTrend.trend === 'UP'
+                        || (!_w4IsTVE && _wTrend.trend === 'UP_WEAK' && _wTickMom !== 'SELL');
         if (dir === 'BUY' && _wDownBlk) {
           addLog('[WATCH] 🚫 BUY في هبوط — مُلغاة (' + _wTrend.label + ')', 'error');
           _readySignal = null; return;
@@ -3296,15 +3299,16 @@
     const dir = _readySignal.signal;
     const a   = _readySignal.asset || activeAsset;
     if (!dir || !a) return;
-    // ✅ نفس فلتر الاتجاه من Signal Watcher — UP_WEAK/DN_WEAK محجوب
+    // فلتر الاتجاه — TVE يتجاوز WEAK (نفس منطق WATCH-4)
     const _fCandles = candleBuffers[a] || [];
     if (_fCandles.length >= 3) {
-      const _fTrend   = analyzeTrend(_fCandles);
-      const _fTickMom = _tickMomentumDir(a);
-      const _fDownBlk = _fTrend.trend === 'DOWN'
-                     || (_fTrend.trend === 'DN_WEAK' && _fTickMom !== 'BUY');
-      const _fUpBlk   = _fTrend.trend === 'UP'
-                     || (_fTrend.trend === 'UP_WEAK' && _fTickMom !== 'SELL');
+      const _fTrend    = analyzeTrend(_fCandles);
+      const _fIsTVEH4  = _readySignal?.isTVE === true;
+      const _fTickMom  = _tickMomentumDir(a);
+      const _fDownBlk  = _fTrend.trend === 'DOWN'
+                      || (!_fIsTVEH4 && _fTrend.trend === 'DN_WEAK' && _fTickMom !== 'BUY');
+      const _fUpBlk    = _fTrend.trend === 'UP'
+                      || (!_fIsTVEH4 && _fTrend.trend === 'UP_WEAK' && _fTickMom !== 'SELL');
       if (dir === 'BUY' && _fDownBlk)  { addLog('[IMM] 🚫 BUY في هبوط — مُلغاة ('+_fTrend.label+')', 'error'); _readySignal = null; return; }
       if (dir === 'SELL' && _fUpBlk)   { addLog('[IMM] 🚫 SELL في صعود — مُلغاة ('+_fTrend.label+')', 'error'); _readySignal = null; return; }
     }
