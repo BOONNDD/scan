@@ -4,12 +4,16 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Intent
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.webkit.*
 import android.widget.EditText
 import android.widget.TextView
@@ -26,10 +30,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connDot       : View
     private lateinit var updateTimer   : TextView
     private lateinit var swipeRefresh  : SwipeRefreshLayout
+    private lateinit var urlBar        : EditText
+    private lateinit var btnBack       : TextView
+    private lateinit var btnForward    : TextView
     private lateinit var socketClient  : BotSocketClient
     private lateinit var scriptManager : ScriptManager
+    private lateinit var extManager    : ExtensionManager
 
-    private var currentScript : String? = null
+    private var currentScript: String? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -40,23 +48,35 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         BotPrefs.init(applicationContext)
+        extManager = ExtensionManager(this)
 
         webView      = findViewById(R.id.webview)
         statusBar    = findViewById(R.id.status_bar)
         connDot      = findViewById(R.id.conn_dot)
         updateTimer  = findViewById(R.id.update_timer)
         swipeRefresh = findViewById(R.id.swipe_refresh)
+        urlBar       = findViewById(R.id.url_bar)
+        btnBack      = findViewById(R.id.btn_back)
+        btnForward   = findViewById(R.id.btn_forward)
 
-        setupSwipeRefresh()
+        swipeRefresh.setColorSchemeColors(0xFF00FF88.toInt())
+        swipeRefresh.setProgressBackgroundColorSchemeColor(0xFF111827.toInt())
+
         setupWebView()
+        setupNavBar()
         setupSocketClient()
         setupScriptManager()
         startStatusPolling()
 
+        // Status bar controls
         findViewById<TextView>(R.id.btn_refresh).setOnClickListener { webView.reload() }
-
-        swipeRefresh.setColorSchemeColors(0xFF00FF88.toInt())
-        swipeRefresh.setProgressBackgroundColorSchemeColor(0xFF111827.toInt())
+        swipeRefresh.setOnRefreshListener { webView.reload() }
+        // Extensions manager
+        findViewById<TextView>(R.id.btn_extensions).setOnClickListener {
+            startActivity(Intent(this, ExtensionManagerActivity::class.java))
+        }
+        // DevTools toggle
+        findViewById<TextView>(R.id.btn_devtools).setOnClickListener { toggleDevTools() }
 
         webView.loadUrl("https://pocketoption.com/en/login/")
         showPersistentNotification()
@@ -69,12 +89,20 @@ class MainActivity : AppCompatActivity() {
         scriptManager.stop()
     }
 
+    // Back key → WebView history first
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+            webView.goBack(); return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     // ── Menu ──────────────────────────────────────────────────────────────────
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menu.add(0, 1, 0, "⚙️ الإعدادات")
         menu.add(0, 2, 0, "🔄 تحديث السكربت")
-        menu.add(0, 3, 0, "🔁 إعادة تحميل")
+        menu.add(0, 3, 0, "🏠 الصفحة الرئيسية")
         return true
     }
 
@@ -82,18 +110,48 @@ class MainActivity : AppCompatActivity() {
         return when (item.itemId) {
             1 -> { showSettings(); true }
             2 -> { scriptManager.forceRefresh(); true }
-            3 -> { webView.reload(); true }
+            3 -> { webView.loadUrl("https://pocketoption.com/en/cabinet/demo-quick-high-low/"); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
-    // ── SwipeRefreshLayout ────────────────────────────────────────────────────
+    // ── Navigation bar ────────────────────────────────────────────────────────
 
-    private fun setupSwipeRefresh() {
-        swipeRefresh.setOnRefreshListener {
-            webView.reload()
-            // spinner stops in onPageFinished via BotWebViewClient.onPageLoaded callback
+    private fun setupNavBar() {
+        btnBack.setOnClickListener { if (webView.canGoBack()) webView.goBack() }
+        btnForward.setOnClickListener { if (webView.canGoForward()) webView.goForward() }
+
+        urlBar.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_GO) {
+                navigateToUrl(urlBar.text.toString().trim())
+                true
+            } else false
         }
+        urlBar.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) urlBar.selectAll()
+        }
+    }
+
+    private fun navigateToUrl(input: String) {
+        if (input.isBlank()) return
+        val url = when {
+            input.startsWith("http://") || input.startsWith("https://") -> input
+            input.contains(".") -> "https://$input"
+            else -> "https://www.google.com/search?q=${java.net.URLEncoder.encode(input, "UTF-8")}"
+        }
+        webView.loadUrl(url)
+        hideKeyboard()
+    }
+
+    private fun hideKeyboard() {
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(urlBar.windowToken, 0)
+        urlBar.clearFocus()
+    }
+
+    private fun updateNavButtons() {
+        btnBack.alpha    = if (webView.canGoBack()) 1.0f else 0.3f
+        btnForward.alpha = if (webView.canGoForward()) 1.0f else 0.3f
     }
 
     // ── WebView ───────────────────────────────────────────────────────────────
@@ -121,9 +179,11 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(jsInterface, "Android")
 
         webView.webViewClient = BotWebViewClient(
-            getScript    = { currentScript },
-            onLog        = { msg -> handleLog(msg, "system") },
-            onPageLoaded = { runOnUiThread { swipeRefresh.isRefreshing = false } },
+            getScript     = { currentScript },
+            onLog         = { msg -> handleLog(msg, "system") },
+            onPageLoaded  = { runOnUiThread { swipeRefresh.isRefreshing = false; updateNavButtons() } },
+            onUrlChanged  = { url -> runOnUiThread { urlBar.setText(url); updateNavButtons() } },
+            getExtensions = { url -> extManager.getScriptsForUrl(url) },
         )
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -142,6 +202,28 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         }
+    }
+
+    // ── DevTools (Eruda) ──────────────────────────────────────────────────────
+
+    private fun toggleDevTools() {
+        val js = """
+            (function() {
+                if (window.__eruda_loaded__) {
+                    if (typeof eruda !== 'undefined') {
+                        eruda._isShow ? eruda.hide() : eruda.show();
+                    }
+                    return;
+                }
+                window.__eruda_loaded__ = true;
+                var s = document.createElement('script');
+                s.src = 'https://cdn.jsdelivr.net/npm/eruda@latest/eruda.min.js';
+                s.onload = function() { eruda.init(); eruda.show(); };
+                document.head.appendChild(s);
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+        handleLog("🔧 DevTools toggled", "system")
     }
 
     // ── Socket client ─────────────────────────────────────────────────────────
@@ -185,7 +267,7 @@ class MainActivity : AppCompatActivity() {
         scriptManager.start()
     }
 
-    // ── Polling: connection dot + update timer ────────────────────────────────
+    // ── Status polling: connection dot + countdown ─────────────────────────────
 
     private fun startStatusPolling() {
         scope.launch {
@@ -209,9 +291,7 @@ class MainActivity : AppCompatActivity() {
             updateTimer.text = "🔄 ..."
         } else {
             val secs = (remaining / 1000).toInt()
-            val m    = secs / 60
-            val s    = secs % 60
-            updateTimer.text = "🔄 $m:%02d".format(s)
+            updateTimer.text = "🔄 ${secs / 60}:%02d".format(secs % 60)
         }
     }
 
@@ -223,31 +303,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleStats(obj: JSONObject) {
-        val wins   = obj.optInt("wins", 0)
-        val losses = obj.optInt("losses", 0)
-        val total  = wins + losses
-        val wr     = if (total > 0) wins * 100.0 / total else 0.0
+        val wins  = obj.optInt("wins", 0)
+        val losses= obj.optInt("losses", 0)
+        val total = wins + losses
+        val wr    = if (total > 0) wins * 100.0 / total else 0.0
         setStatus("W:$wins L:$losses WR:${"%.1f".format(wr)}%")
         socketClient.sendStats(JSONObject().apply {
-            put("wins",    wins)
-            put("losses",  losses)
-            put("total",   total)
-            put("winRate", wr)
+            put("wins", wins); put("losses", losses)
+            put("total", total); put("winRate", wr)
             put("balance", obj.optDouble("balance", 0.0))
         })
     }
 
-    private fun handleTrade(obj: JSONObject) = socketClient.sendTrade(obj)
-
-    private fun handleStatus(s: String) {
-        setStatus(s)
-        socketClient.sendStatus(s)
-    }
-
-    private fun handleBotReady() {
-        handleLog("🤖 Bot ready", "system")
-        socketClient.sendStatus("IDLE")
-    }
+    private fun handleTrade(obj: JSONObject)  = socketClient.sendTrade(obj)
+    private fun handleStatus(s: String)       { setStatus(s); socketClient.sendStatus(s) }
+    private fun handleBotReady()              { handleLog("🤖 Bot ready", "system"); socketClient.sendStatus("IDLE") }
 
     private fun executeCommand(cmd: String, payload: JSONObject?) {
         val js = when (cmd) {
@@ -268,7 +338,7 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript(cleaned) { handleLog("🤖 Script injected", "system") }
     }
 
-    // ── UI ────────────────────────────────────────────────────────────────────
+    // ── UI helpers ────────────────────────────────────────────────────────────
 
     private fun setStatus(msg: String) = runOnUiThread {
         statusBar.text = msg.take(120)
@@ -284,18 +354,15 @@ class MainActivity : AppCompatActivity() {
             .setNeutralButton("Script URL") { _, _ ->
                 showEditDialog("Script URL", BotPrefs.scriptUrl) { BotPrefs.scriptUrl = it }
             }
-            .setNegativeButton("إغلاق", null)
-            .show()
+            .setNegativeButton("إغلاق", null).show()
     }
 
     private fun showEditDialog(title: String, current: String, onSave: (String) -> Unit) {
         val input = EditText(this).apply { setText(current) }
         AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(input)
+            .setTitle(title).setView(input)
             .setPositiveButton("حفظ") { _, _ -> onSave(input.text.toString().trim()) }
-            .setNegativeButton("إلغاء", null)
-            .show()
+            .setNegativeButton("إلغاء", null).show()
     }
 
     // ── Persistent notification ───────────────────────────────────────────────
@@ -308,12 +375,10 @@ class MainActivity : AppCompatActivity() {
                     .apply { description = "Bot is running" }
             )
         }
-        val n = NotificationCompat.Builder(this, "bot")
+        nm.notify(1, NotificationCompat.Builder(this, "bot")
             .setContentTitle("⚡ Supreme Bot")
             .setContentText("Bot is active")
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setOngoing(true)
-            .build()
-        nm.notify(1, n)
+            .setOngoing(true).build())
     }
 }

@@ -41,7 +41,11 @@ class ScriptManager(
     }
 
     fun forceRefresh() {
-        scope.launch { fetchIfNew(force = true) }
+        scope.launch {
+            fetchIfNew(force = true)
+            lastCheckMs = System.currentTimeMillis()
+            onChecked?.invoke()
+        }
     }
 
     fun stop() { scope.cancel() }
