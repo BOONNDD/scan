@@ -518,12 +518,17 @@
     _payloadCache.suffixPut  = _payloadCache.suffixCall;
   }
 
-  function _getCachedPayload(direction, overrideAmount) {
+  function _getCachedPayload(direction, overrideAmount, overrideTime) {
+    const t = overrideTime ? overrideTime : snapToPOTime(candlePeriod || 5);
     if (overrideAmount && overrideAmount !== tradeAmount) {
-      const a = activeAsset || '', t = snapToPOTime(candlePeriod||5), d = isDemo;
+      const a = activeAsset || '', d = isDemo;
       const reqId = _nextReqId();
       const base  = '42["openOrder",{"asset":"'+a+'","amount":'+overrideAmount+',"action":"'+(direction==='BUY'?'call':'put')+'","isDemo":'+d+',"requestId":'+reqId+',"optionType":100,"time":'+t+'}]';
       return base;
+    }
+    if (overrideTime) {
+      const a = activeAsset || '', d = isDemo, reqId = _nextReqId();
+      return '42["openOrder",{"asset":"'+a+'","amount":'+tradeAmount+',"action":"'+(direction==='BUY'?'call':'put')+'","isDemo":'+d+',"requestId":'+reqId+',"optionType":100,"time":'+t+'}]';
     }
     _rebuildPayloadCache();
     const requestId = _nextReqId();
@@ -3192,10 +3197,13 @@
     if (tradeWSOrig && tradeWS && tradeWS.readyState === 1) {
       try {
         const nowPf2 = W.performance?.now?.() ?? Date.now();
-        const ghostOk = !overrideAmount && _ghostExecPacket &&
+        // TVE يستخدم 3ث دائماً — الزخم العاجل لا يستمر أطول من 3 ثوان
+        const _isTVEFire = _readySignal?.isTVE === true;
+        const ghostOk = !_isTVEFire && !overrideAmount && _ghostExecPacket &&
                         _ghostExecPacket.signal === direction &&
                         nowPf2 - _ghostExecPacket.builtAt < 2500;
-        const packet = ghostOk ? _ghostExecPacket.packet : _getCachedPayload(direction, overrideAmount);
+        const packet = ghostOk ? _ghostExecPacket.packet
+                                : _getCachedPayload(direction, overrideAmount, _isTVEFire ? 3 : null);
         _ghostExecPacket = null;
         tradeWSOrig(packet);
         success = true;
