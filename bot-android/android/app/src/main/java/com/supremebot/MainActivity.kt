@@ -1,16 +1,16 @@
 package com.supremebot
 
 import android.annotation.SuppressLint
-import android.app.*
-import android.content.Intent
-import android.graphics.Color
+import android.app.AlertDialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.webkit.*
-import android.widget.*
-import androidx.appcompat.app.AlertDialog
+import android.widget.EditText
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
@@ -18,12 +18,12 @@ import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var webView      : WebView
-    private lateinit var statusBar    : TextView
-    private lateinit var socketClient : BotSocketClient
-    private lateinit var scriptManager: ScriptManager
+    private lateinit var webView       : WebView
+    private lateinit var statusBar     : TextView
+    private lateinit var socketClient  : BotSocketClient
+    private lateinit var scriptManager : ScriptManager
 
-    private var currentScript  : String? = null
+    private var currentScript : String? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -34,7 +34,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         BotPrefs.init(applicationContext)
-        createNotificationChannel()
 
         webView   = findViewById(R.id.webview)
         statusBar = findViewById(R.id.status_bar)
@@ -43,10 +42,8 @@ class MainActivity : AppCompatActivity() {
         setupSocketClient()
         setupScriptManager()
 
-        // Load Pocket Option
         webView.loadUrl("https://pocketoption.com/en/login/")
-
-        startForegroundNotification()
+        showPersistentNotification()
     }
 
     override fun onDestroy() {
@@ -59,9 +56,9 @@ class MainActivity : AppCompatActivity() {
     // ── Menu ──────────────────────────────────────────────────────────────────
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(Menu.NONE, 1, Menu.NONE, "⚙️ الإعدادات")
-        menu.add(Menu.NONE, 2, Menu.NONE, "🔄 تحديث السكربت")
-        menu.add(Menu.NONE, 3, Menu.NONE, "🔁 إعادة تحميل الصفحة")
+        menu.add(0, 1, 0, "⚙️ الإعدادات")
+        menu.add(0, 2, 0, "🔄 تحديث السكربت")
+        menu.add(0, 3, 0, "🔁 إعادة تحميل")
         return true
     }
 
@@ -74,27 +71,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── WebView setup ─────────────────────────────────────────────────────────
+    // ── WebView ───────────────────────────────────────────────────────────────
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
-        val settings = webView.settings
-        settings.javaScriptEnabled      = true
-        settings.domStorageEnabled      = true
-        settings.databaseEnabled        = true
-        settings.mixedContentMode       = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        settings.userAgentString        = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
-        settings.allowContentAccess     = true
-        settings.loadsImagesAutomatically = true
-        settings.mediaPlaybackRequiresUserGesture = false
+        webView.settings.apply {
+            javaScriptEnabled               = true
+            domStorageEnabled               = true
+            databaseEnabled                 = true
+            mixedContentMode                = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            userAgentString                 = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+            allowContentAccess              = true
+            loadsImagesAutomatically        = true
+            mediaPlaybackRequiresUserGesture = false
+        }
 
-        // JS interface — accessible as window.Android in JS
         val jsInterface = BotJsInterface(
             onLog    = { msg, type -> handleLog(msg, type) },
-            onStats  = { obj       -> handleStats(obj)     },
-            onTrade  = { obj       -> handleTrade(obj)     },
-            onStatus = { s         -> handleStatus(s)      },
-            onReady  = {             handleBotReady()      },
+            onStats  = { obj       -> handleStats(obj) },
+            onTrade  = { obj       -> handleTrade(obj) },
+            onStatus = { s         -> handleStatus(s) },
+            onReady  = {             handleBotReady() },
         )
         webView.addJavascriptInterface(jsInterface, "Android")
 
@@ -105,19 +102,16 @@ class MainActivity : AppCompatActivity() {
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(m: ConsoleMessage): Boolean {
-                // Capture console.log from the bot
-                val level = when (m.messageLevel()) {
-                    ConsoleMessage.MessageLevel.ERROR -> "error"
-                    ConsoleMessage.MessageLevel.WARNING -> "warn"
-                    else -> "debug"
-                }
-                // Only relay logs that look like bot logs (contain emoji or keywords)
                 val msg = m.message()
                 if (msg.contains("SUPREME") || msg.contains("TVE") ||
-                    msg.contains("WIN") || msg.contains("LOSS") ||
                     msg.startsWith("❌") || msg.startsWith("✅") ||
                     msg.startsWith("🔔") || msg.startsWith("📊")) {
-                    handleLog(msg, level)
+                    val type = when (m.messageLevel()) {
+                        ConsoleMessage.MessageLevel.ERROR   -> "error"
+                        ConsoleMessage.MessageLevel.WARNING -> "warn"
+                        else -> "info"
+                    }
+                    handleLog(msg, type)
                 }
                 return true
             }
@@ -133,10 +127,10 @@ class MainActivity : AppCompatActivity() {
             },
             onReloadScript = { script, version ->
                 currentScript = script
-                BotPrefs.cachedScript   = script
-                BotPrefs.scriptVersion  = version
+                BotPrefs.cachedScript  = script
+                BotPrefs.scriptVersion = version
                 runOnUiThread {
-                    handleLog("🔄 Hot-reloading script v${version.take(12)}", "system")
+                    handleLog("🔄 Hot-reload v${version.take(12)}", "system")
                     injectScript(script)
                 }
             },
@@ -151,16 +145,13 @@ class MainActivity : AppCompatActivity() {
         scriptManager = ScriptManager(
             onUpdate = { script, version ->
                 currentScript = script
-                BotPrefs.cachedScript   = script
-                BotPrefs.scriptVersion  = version
+                BotPrefs.cachedScript  = script
+                BotPrefs.scriptVersion = version
                 runOnUiThread {
-                    handleLog("📦 Script ready: ${version.take(12)}", "system")
-                    // If page is already loaded, inject immediately
-                    webView.evaluateJavascript("document.readyState", { state ->
-                        if (state?.contains("complete") == true || state?.contains("interactive") == true) {
-                            injectScript(script)
-                        }
-                    })
+                    handleLog("📦 Script v${version.take(12)}", "system")
+                    webView.evaluateJavascript("document.readyState") { state ->
+                        if (state?.contains("complete") == true) injectScript(script)
+                    }
                 }
             },
             onLog = { msg -> runOnUiThread { handleLog(msg, "system") } },
@@ -176,25 +167,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleStats(obj: JSONObject) {
-        val wins    = obj.optInt("wins", 0)
-        val losses  = obj.optInt("losses", 0)
-        val total   = wins + losses
-        val wr      = if (total > 0) wins * 100.0 / total else 0.0
+        val wins   = obj.optInt("wins", 0)
+        val losses = obj.optInt("losses", 0)
+        val total  = wins + losses
+        val wr     = if (total > 0) wins * 100.0 / total else 0.0
         setStatus("W:$wins L:$losses WR:${"%.1f".format(wr)}%")
-
-        val statsForServer = JSONObject().apply {
+        socketClient.sendStats(JSONObject().apply {
             put("wins",    wins)
             put("losses",  losses)
             put("total",   total)
             put("winRate", wr)
             put("balance", obj.optDouble("balance", 0.0))
-        }
-        socketClient.sendStats(statsForServer)
+        })
     }
 
-    private fun handleTrade(obj: JSONObject) {
-        socketClient.sendTrade(obj)
-    }
+    private fun handleTrade(obj: JSONObject) = socketClient.sendTrade(obj)
 
     private fun handleStatus(s: String) {
         setStatus(s)
@@ -202,49 +189,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleBotReady() {
-        handleLog("🤖 Bot initialized and ready", "system")
+        handleLog("🤖 Bot ready", "system")
         socketClient.sendStatus("IDLE")
     }
 
     private fun executeCommand(cmd: String, payload: JSONObject?) {
         val js = when (cmd) {
-            "start"      -> "window.__SUPREME_CMD__ = 'start';"
-            "stop"       -> "window.__SUPREME_CMD__ = 'stop';"
-            "pause"      -> "window.__SUPREME_CMD__ = 'pause';"
-            "set_amount" -> "window.__SUPREME_AMOUNT__ = ${payload?.optDouble("amount", 1.0) ?: 1.0};"
+            "start"      -> "window.__SUPREME_CMD__='start';"
+            "stop"       -> "window.__SUPREME_CMD__='stop';"
+            "pause"      -> "window.__SUPREME_CMD__='pause';"
+            "set_amount" -> "window.__SUPREME_AMOUNT__=${payload?.optDouble("amount", 1.0) ?: 1.0};"
             else         -> null
         }
         js?.let { webView.evaluateJavascript(it, null) }
-        handleLog("▶ Command: $cmd", "system")
+        handleLog("▶ $cmd", "system")
     }
 
     private fun injectScript(script: String) {
         val cleaned = "(function(){\n" +
             script.replace(Regex("""// ==UserScript==[\s\S]*?// ==/UserScript=="""), "") +
             "\n})();"
-        webView.evaluateJavascript(cleaned) { result ->
-            handleLog("🤖 Script re-injected: $result", "system")
-        }
+        webView.evaluateJavascript(cleaned) { handleLog("🤖 Script injected", "system") }
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────
 
-    private fun setStatus(msg: String) {
-        runOnUiThread {
-            statusBar.text = msg.take(120)
-        }
+    private fun setStatus(msg: String) = runOnUiThread {
+        statusBar.text = msg.take(120)
     }
 
     private fun showSettings() {
-        val view   = layoutInflater.inflate(android.R.layout.simple_list_item_2, null)
-        val dialog = AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle("⚙️ الإعدادات")
-            .setMessage("Server URL الحالي:\n${BotPrefs.serverWsUrl}\n\nScript URL:\n${BotPrefs.scriptUrl}")
-            .setPositiveButton("تعديل Server URL") { _, _ -> showEditDialog("Server WS URL", BotPrefs.serverWsUrl) { BotPrefs.serverWsUrl = it } }
-            .setNeutralButton("تعديل Script URL")  { _, _ -> showEditDialog("Script URL",    BotPrefs.scriptUrl)   { BotPrefs.scriptUrl   = it } }
+            .setMessage("Server:\n${BotPrefs.serverWsUrl}\n\nScript:\n${BotPrefs.scriptUrl}")
+            .setPositiveButton("Server URL") { _, _ ->
+                showEditDialog("Server WS URL", BotPrefs.serverWsUrl) { BotPrefs.serverWsUrl = it }
+            }
+            .setNeutralButton("Script URL") { _, _ ->
+                showEditDialog("Script URL", BotPrefs.scriptUrl) { BotPrefs.scriptUrl = it }
+            }
             .setNegativeButton("إغلاق", null)
-            .create()
-        dialog.show()
+            .show()
     }
 
     private fun showEditDialog(title: String, current: String, onSave: (String) -> Unit) {
@@ -257,23 +242,22 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ── Foreground notification (keeps app alive) ─────────────────────────────
+    // ── Persistent notification (keeps screen on / reminds user) ──────────────
 
-    private fun createNotificationChannel() {
+    private fun showPersistentNotification() {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel("bot_channel", "Supreme Bot", NotificationManager.IMPORTANCE_LOW)
-            ch.description = "Bot running in background"
-            getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+            nm.createNotificationChannel(
+                NotificationChannel("bot", "Supreme Bot", NotificationManager.IMPORTANCE_LOW)
+                    .apply { description = "Bot is running" }
+            )
         }
-    }
-
-    private fun startForegroundNotification() {
-        val notification = NotificationCompat.Builder(this, "bot_channel")
-            .setContentTitle("⚡ Supreme Bot Running")
-            .setContentText("Trading bot is active")
+        val n = NotificationCompat.Builder(this, "bot")
+            .setContentTitle("⚡ Supreme Bot")
+            .setContentText("Bot is active")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
-        startForeground(1, notification)
+        nm.notify(1, n)
     }
 }
