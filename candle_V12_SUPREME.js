@@ -1548,6 +1548,13 @@
     STATS.total++;
     if (isTVE) { win ? STATS.tveWins++ : STATS.tveLosses++; }
     else        { win ? STATS.confWins++ : STATS.confLosses++; }
+    // ── Bridge: stats update ─────────────────────────────────────────────────
+    try {
+      W.__SUPREME_BRIDGE__?.stats?.({
+        wins: STATS.wins + (win ? 1 : 0), losses: STATS.losses + (win ? 0 : 1),
+        total: STATS.total, balance: STATS.balance ?? 0,
+      });
+    } catch(_) {}
     if (win) {
       STATS.wins++; STATS.lossStreak = 0;
       STATS.winStreak = (STATS.winStreak || 0) + 1;
@@ -3208,6 +3215,8 @@
         tradeWSOrig(packet);
         success = true;
         PERF.mark('orderSent'); PERF.report();
+        // ── Bridge: report trade sent ────────────────────────────────────────
+        try { W.__SUPREME_BRIDGE__?.trade?.({ dir: direction, conf: ps?.spConf, ts: Date.now() }); } catch(_) {}
       } catch(e) { addLog('❌ WS error: '+e.message,'error'); }
     }
 
@@ -3461,6 +3470,8 @@
     // تحديث عداد السجل في الزر
     const badge = W.document.getElementById('cbLogCount');
     if (badge) badge.textContent = _logSeq;
+    // ── Android / Server bridge (optional — only active inside APK) ──────────
+    try { W.__SUPREME_BRIDGE__?.log?.(msg, type); } catch(_) {}
   }
 
   const HUD_CSS = `
