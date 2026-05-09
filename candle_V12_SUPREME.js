@@ -3120,7 +3120,7 @@
     _pendingIsTVE = false;  // امسح بعد القراءة
     const _minConfThreshold = _regime === 'VOLATILE'
       ? CFG.SUPREME_VOLATILE_THRESH
-      : (_isTVE ? Math.max(62, CFG.SUPREME_MIN_CONF - 8) : CFG.SUPREME_MIN_CONF);
+      : (_isTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_MIN_CONF);
 
     const _supremeOk = (_spDir === direction || _spDir === 'NEUTRAL')
                        && _spConf >= _minConfThreshold
@@ -3282,7 +3282,7 @@
       // TVE عتبة الإلغاء 63% بدل 65% (نفس عتبة H5 للـ TVE)
       const _spConfNow = _PS.spConf ?? 0;
       const _w2IsTVE   = _readySignal?.isTVE === true;
-      const _cancelThr = _w2IsTVE ? Math.max(62, CFG.SUPREME_MIN_CONF - 8) : CFG.SUPREME_CANCEL_CONF;
+      const _cancelThr = _w2IsTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_CANCEL_CONF;
       if (_spConfNow < _cancelThr) {
         addLog('[WATCH] 🔴 ثقة انخفضت ' + _spConfNow + '% < ' + _cancelThr + '% — إلغاء', 'info');
         _readySignal = null; return;
@@ -3332,7 +3332,7 @@
       const _wIsTVE = _readySignal?.isTVE === true;
       const _minConf = _regime === 'VOLATILE'
         ? CFG.SUPREME_VOLATILE_THRESH
-        : (_wIsTVE ? Math.max(62, CFG.SUPREME_MIN_CONF - 8) : CFG.SUPREME_MIN_CONF);
+        : (_wIsTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_MIN_CONF);
       if (_spConfNow < _minConf) {
         addLog('[WATCH] 🔴 ثقة غير كافية ' + _spConfNow + '% < ' + _minConf + '% — إلغاء', 'error');
         _readySignal = null; return;
@@ -3380,7 +3380,7 @@
     const _immIsTVE = _readySignal?.isTVE === true;
     const _immMin   = _immRegime === 'VOLATILE'
       ? CFG.SUPREME_VOLATILE_THRESH
-      : (_immIsTVE ? Math.max(62, CFG.SUPREME_MIN_CONF - 8) : CFG.SUPREME_MIN_CONF);
+      : (_immIsTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_MIN_CONF);
     if (_immSpConf < CFG.SUPREME_CANCEL_CONF) {
       addLog('[IMM] 🚫 SUPREME-PRED ثقة سقطت ('+_immSpConf.toFixed(0)+'%) — مُلغاة', 'error');
       _readySignal = null; return;
