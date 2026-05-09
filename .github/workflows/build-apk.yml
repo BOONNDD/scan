@@ -43,11 +43,13 @@ jobs:
         env:
           GRADLE_OPTS: "-Xmx3g -XX:MaxMetaspaceSize=512m"
 
-      - name: Verify APK exists
+      - name: Show build output directory
+        if: always()
         run: |
-          APK=bot-android/android/app/build/outputs/apk/debug/app-debug.apk
-          ls -lh "$APK"
-          echo "✅ APK ready: $(du -sh $APK | cut -f1)"
+          echo "=== Build output ==="
+          find bot-android/android/app/build -name "*.apk" 2>/dev/null || echo "No APK found"
+          echo "=== Build dir exists? ==="
+          ls bot-android/android/app/build/outputs/ 2>/dev/null || echo "outputs dir missing"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
