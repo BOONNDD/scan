@@ -1,161 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#0a0e1a">
+    android:background="#0F0F1A">
 
-    <!-- ── Navigation bar: back · forward · URL bar · extensions · DevTools ── -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="44dp"
-        android:background="#0d1117"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingStart="2dp"
-        android:paddingEnd="2dp">
-
-        <TextView
-            android:id="@+id/btn_back"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:text="←"
-            android:textColor="#666666"
-            android:textSize="20sp"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Back"/>
-
-        <TextView
-            android:id="@+id/btn_forward"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:text="→"
-            android:textColor="#666666"
-            android:textSize="20sp"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Forward"/>
-
-        <EditText
-            android:id="@+id/url_bar"
-            android:layout_width="0dp"
-            android:layout_height="30dp"
-            android:layout_weight="1"
-            android:background="#1a2035"
-            android:textColor="#dddddd"
-            android:textSize="11sp"
-            android:fontFamily="monospace"
-            android:paddingStart="10dp"
-            android:paddingEnd="10dp"
-            android:singleLine="true"
-            android:imeOptions="actionGo"
-            android:inputType="textUri"
-            android:hint="https://..."
-            android:textColorHint="#333344"
-            android:layout_marginStart="4dp"
-            android:layout_marginEnd="4dp"/>
-
-        <TextView
-            android:id="@+id/btn_extensions"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:text="🧩"
-            android:textSize="17sp"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Extensions"/>
-
-        <TextView
-            android:id="@+id/btn_devtools"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:text="🔧"
-            android:textSize="17sp"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="DevTools"/>
-
-    </LinearLayout>
-
-    <!-- ── Status bar: conn dot · log text · update timer · refresh ──────── -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#111827"
         android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingStart="8dp"
-        android:paddingEnd="4dp"
-        android:paddingTop="5dp"
-        android:paddingBottom="5dp">
-
-        <View
-            android:id="@+id/conn_dot"
-            android:layout_width="10dp"
-            android:layout_height="10dp"
-            android:background="@drawable/circle_dot"
-            android:layout_marginEnd="7dp"/>
+        android:background="#1A1A2E"
+        android:padding="8dp">
 
         <TextView
-            android:id="@+id/status_bar"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:textColor="#00ff88"
-            android:textSize="11sp"
-            android:fontFamily="monospace"
-            android:maxLines="2"
-            android:ellipsize="end"
-            android:text="⚡ Supreme Bot — Initializing..."/>
+            android:text="SUPREME BOT V12"
+            android:textColor="#E94560"
+            android:textStyle="bold"
+            android:textSize="14sp"
+            android:gravity="center_vertical" />
 
         <TextView
-            android:id="@+id/update_timer"
+            android:id="@+id/statusText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:text="Connecting..."
             android:textColor="#888888"
-            android:textSize="10sp"
-            android:fontFamily="monospace"
-            android:text="🔄 5:00"
-            android:layout_marginStart="6dp"
-            android:layout_marginEnd="2dp"/>
-
-        <TextView
-            android:id="@+id/btn_refresh"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:text="⟳"
-            android:textColor="#00ff88"
-            android:textSize="22sp"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Reload page"/>
-
+            android:textSize="11sp"
+            android:gravity="center_vertical" />
     </LinearLayout>
 
-    <!-- ── Pull-to-refresh + WebView ────────────────────────────────────── -->
-    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-        android:id="@+id/swipe_refresh"
+    <WebView
+        android:id="@+id/webView"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1">
-
-        <WebView
-            android:id="@+id/webview"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"/>
-
-    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+        android:layout_weight="1" />
 
 </LinearLayout>

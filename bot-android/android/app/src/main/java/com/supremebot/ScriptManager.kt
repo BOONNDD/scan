@@ -1,96 +1,85 @@
 package com.supremebot
 
+import android.util.Log
 import kotlinx.coroutines.*
 import java.net.HttpURLConnection
 import java.net.URL
 
-/**
- * Polls GitHub for script updates every [pollIntervalMs] milliseconds.
- * Calls [onUpdate] with the new script text when a new version is detected.
- */
 class ScriptManager(
-    private val pollIntervalMs : Long = 5 * 60_000L,
-    private val onUpdate       : (script: String, version: String) -> Unit,
-    private val onLog          : (String) -> Unit,
-    private val onChecked      : (() -> Unit)? = null,
+    private val onUpdate: (script: String, version: String?) -> Unit,
+    private val onChecked: () -> Unit
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    companion object {
+        private const val TAG = "ScriptManager"
+        private const val POLL_INTERVAL_MS = 5 * 60 * 1000L
+    }
 
-    /** Timestamp (ms) of the most recent completed poll cycle. */
-    @Volatile var lastCheckMs: Long = System.currentTimeMillis()
+    var lastCheckMs: Long = 0L
         private set
 
-    val pollIntervalMsPublic: Long get() = pollIntervalMs
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    fun start() {
+    fun start(cachedScript: String?, cachedVersion: String?) {
+        if (cachedScript != null) {
+            onUpdate(cachedScript, cachedVersion)
+        }
         scope.launch {
-            // Load cached script immediately so the bot can start before network
-            val cached = BotPrefs.cachedScript
-            if (cached.isNotEmpty()) {
-                onUpdate(cached, BotPrefs.scriptVersion)
-                onLog("📦 Loaded cached script v${BotPrefs.scriptVersion.take(12)}")
-            }
-
             while (isActive) {
-                fetchIfNew()
-                lastCheckMs = System.currentTimeMillis()
-                onChecked?.invoke()
-                delay(pollIntervalMs)
+                checkForUpdate()
+                delay(POLL_INTERVAL_MS)
             }
         }
     }
 
-    fun forceRefresh() {
-        scope.launch {
-            fetchIfNew(force = true)
-            lastCheckMs = System.currentTimeMillis()
-            onChecked?.invoke()
-        }
+    fun stop() {
+        scope.cancel()
     }
 
-    fun stop() { scope.cancel() }
+    private suspend fun checkForUpdate() = withContext(Dispatchers.IO) {
+        lastCheckMs = System.currentTimeMillis()
+        onChecked()
 
-    // ── Internal ──────────────────────────────────────────────────────────────
+        val url = URL(BotPrefs.SCRIPT_GITHUB_URL)
+        val conn = url.openConnection() as HttpURLConnection
+        conn.connectTimeout = 30_000
+        conn.readTimeout = 30_000
+        conn.setRequestProperty("User-Agent", "SupremeBot-Android/1.0")
 
-    private suspend fun fetchIfNew(force: Boolean = false) = withContext(Dispatchers.IO) {
+        val storedEtag = BotPrefs.scriptVersion
+        if (storedEtag != null) {
+            conn.setRequestProperty("If-None-Match", storedEtag)
+        }
+
         try {
-            val url  = BotPrefs.scriptUrl
-            if (url.isEmpty()) return@withContext
-
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout   = 10_000
-                readTimeout      = 15_000
-                requestMethod    = "GET"
-                if (!force && BotPrefs.scriptVersion.isNotEmpty()) {
-                    setRequestProperty("If-None-Match", BotPrefs.scriptVersion)
-                }
-            }
-
             val code = conn.responseCode
             if (code == 304) {
-                // Not modified — still send cached so WebView always has a script
+                Log.d(TAG, "Script unchanged (304)")
                 return@withContext
             }
             if (code != 200) {
-                onLog("⚠️ Script fetch HTTP $code")
+                Log.w(TAG, "Unexpected HTTP $code")
                 return@withContext
             }
 
-            val script  = conn.inputStream.bufferedReader().readText()
-            val etag    = conn.getHeaderField("ETag")
-                        ?: conn.getHeaderField("Last-Modified")
-                        ?: System.currentTimeMillis().toString()
+            val content = conn.inputStream.bufferedReader().readText()
+            val etag = conn.getHeaderField("ETag")
 
-            if (etag != BotPrefs.scriptVersion || force) {
-                val isNew = BotPrefs.scriptVersion.isNotEmpty()
-                BotPrefs.cachedScript   = script
-                BotPrefs.scriptVersion  = etag
-                onLog(if (isNew) "🔄 Script updated: ${etag.take(12)}"
-                      else       "📦 Script loaded: ${etag.take(12)}")
-                onUpdate(script, etag)
+            if (etag != null && etag == storedEtag) {
+                Log.d(TAG, "Script same ETag, skip")
+                return@withContext
+            }
+
+            BotPrefs.cachedScript = content
+            BotPrefs.scriptVersion = etag
+
+            Log.i(TAG, "Script updated: etag=$etag size=${content.length}")
+            withContext(Dispatchers.Main) {
+                onUpdate(content, etag)
             }
         } catch (e: Exception) {
-            onLog("⚠️ Script fetch error: ${e.message}")
+            Log.e(TAG, "Script fetch error", e)
+        } finally {
+            conn.disconnect()
         }
     }
 }

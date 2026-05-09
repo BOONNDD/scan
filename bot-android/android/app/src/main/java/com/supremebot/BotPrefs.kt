@@ -4,32 +4,33 @@ import android.content.Context
 import android.content.SharedPreferences
 
 object BotPrefs {
+    private const val PREFS_NAME = "supreme_bot_prefs"
+    private const val KEY_CACHED_SCRIPT = "cached_script"
+    private const val KEY_SCRIPT_VERSION = "script_version"
+    private const val KEY_SERVER_URL = "server_url"
 
-    private lateinit var prefs: SharedPreferences
+    private fun prefs(ctx: Context): SharedPreferences =
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    var cachedScript: String?
+        get() = _prefs?.getString(KEY_CACHED_SCRIPT, null)
+        set(value) { _prefs?.edit()?.putString(KEY_CACHED_SCRIPT, value)?.apply() }
+
+    var scriptVersion: String?
+        get() = _prefs?.getString(KEY_SCRIPT_VERSION, null)
+        set(value) { _prefs?.edit()?.putString(KEY_SCRIPT_VERSION, value)?.apply() }
+
+    var serverUrl: String
+        get() = _prefs?.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
+        set(value) { _prefs?.edit()?.putString(KEY_SERVER_URL, value)?.apply() }
+
+    private var _prefs: SharedPreferences? = null
 
     fun init(ctx: Context) {
-        prefs = ctx.getSharedPreferences("supreme_bot", Context.MODE_PRIVATE)
+        _prefs = prefs(ctx)
     }
 
-    var serverWsUrl: String
-        get() = prefs.getString("server_ws_url", "wss://pocket-option-bot--azzideenalhwry.replit.app/ws") ?: "wss://pocket-option-bot--azzideenalhwry.replit.app/ws"
-        set(v) { prefs.edit().putString("server_ws_url", v).apply() }
-
-    var scriptUrl: String
-        get() = prefs.getString("script_url",
-            "https://raw.githubusercontent.com/boonndd/scan/claude/supreme-pred-v2-engine-UiUx4/candle_V12_SUPREME.js"
-        ) ?: ""
-        set(v) { prefs.edit().putString("script_url", v).apply() }
-
-    var scriptVersion: String
-        get() = prefs.getString("script_version", "") ?: ""
-        set(v) { prefs.edit().putString("script_version", v).apply() }
-
-    var cachedScript: String
-        get() = prefs.getString("cached_script", "") ?: ""
-        set(v) { prefs.edit().putString("cached_script", v).apply() }
-
-    var isDemo: Boolean
-        get() = prefs.getBoolean("is_demo", true)
-        set(v) { prefs.edit().putBoolean("is_demo", v).apply() }
+    const val DEFAULT_SERVER_URL = "wss://pocket-option-bot--azzideenalhwry.replit.app/ws"
+    const val SCRIPT_GITHUB_URL =
+        "https://raw.githubusercontent.com/boonndd/scan/claude/supreme-pred-v2-engine-UiUx4/candle_V12_SUPREME.js"
 }
