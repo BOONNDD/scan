@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Supreme Bot Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0e1a; --bg2: #111827; --bg3: #1a2332;
+    --green: #00ff88; --red: #ff4466; --blue: #3b82f6;
+    --yellow: #fbbf24; --gray: #6b7280; --text: #e2e8f0;
+    --border: #1e293b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; font-size: 13px; }
+
+  header {
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { color: var(--green); font-size: 16px; font-weight: bold; letter-spacing: 2px; }
+  .conn-badge {
+    padding: 3px 10px; border-radius: 20px; font-size: 11px;
+    background: var(--red); color: #fff; transition: .3s;
+  }
+  .conn-badge.online { background: var(--green); color: #000; }
+  .status-chip {
+    padding: 3px 10px; border-radius: 20px; font-size: 11px;
+    background: var(--bg3); border: 1px solid var(--border);
+  }
+  .status-chip.trading { border-color: var(--green); color: var(--green); }
+  .status-chip.paused  { border-color: var(--yellow); color: var(--yellow); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .card-title { color: var(--gray); font-size: 11px; letter-spacing: 1px; margin-bottom: 12px; }
+
+  /* Stats */
+  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .stat-box { background: var(--bg3); border-radius: 8px; padding: 12px; text-align: center; }
+  .stat-val { font-size: 22px; font-weight: bold; }
+  .stat-lbl { color: var(--gray); font-size: 10px; margin-top: 4px; }
+  .green { color: var(--green); } .red { color: var(--red); }
+  .blue  { color: var(--blue); } .yellow { color: var(--yellow); }
+
+  /* Controls */
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  button {
+    padding: 10px 18px; border-radius: 8px; border: none;
+    cursor: pointer; font-size: 13px; font-weight: bold; transition: .2s;
+    font-family: inherit;
+  }
+  .btn-green  { background: var(--green); color: #000; }
+  .btn-red    { background: var(--red);   color: #fff; }
+  .btn-blue   { background: var(--blue);  color: #fff; }
+  .btn-gray   { background: var(--bg3);   color: var(--text); border: 1px solid var(--border); }
+  button:hover { opacity: .85; transform: translateY(-1px); }
+  button:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+
+  /* Version */
+  #script-version { color: var(--gray); font-size: 11px; margin-top: 10px; }
+
+  /* Logs */
+  #log-box {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; height: 320px; overflow-y: auto;
+    padding: 10px; font-size: 12px; display: flex; flex-direction: column;
+  }
+  .log-entry { padding: 3px 0; border-bottom: 1px solid #1a1a2e; display: flex; gap: 8px; }
+  .log-ts  { color: var(--gray); white-space: nowrap; flex-shrink: 0; }
+  .log-msg { word-break: break-all; }
+  .log-entry.error  .log-msg { color: var(--red); }
+  .log-entry.warn   .log-msg { color: var(--yellow); }
+  .log-entry.system .log-msg { color: var(--blue); }
+  .log-entry.win    .log-msg { color: var(--green); }
+  .log-entry.loss   .log-msg { color: var(--red); }
+
+  /* Trades */
+  #trades-box { max-height: 300px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { color: var(--gray); font-weight: normal; text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid #0f172a; }
+  .win-row td { color: var(--green); }
+  .loss-row td { color: var(--red); }
+
+  /* Connection bar */
+  #conn-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--bg2); border-top: 1px solid var(--border);
+    padding: 6px 20px; display: flex; gap: 16px; font-size: 11px;
+    color: var(--gray); align-items: center;
+  }
+  #ws-url-input {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 4px 10px; font-family: inherit; font-size: 12px;
+    width: 280px;
+  }
+
+  /* Win rate bar */
+  .wr-bar { background: var(--bg3); border-radius: 4px; height: 6px; margin-top: 8px; overflow: hidden; }
+  .wr-fill { height: 100%; background: var(--green); transition: width .5s; }
+
+  /* Alert toast */
+  #toast {
+    position: fixed; top: 60px; right: 20px; background: var(--blue);
+    color: #fff; padding: 10px 18px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 999;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">⚡ SUPREME BOT</span>
+  <span id="conn-badge" class="conn-badge">OFFLINE</span>
+  <span id="status-chip" class="status-chip">IDLE</span>
+  <span id="bot-ip" style="color:var(--gray);font-size:11px;margin-right:auto"></span>
+</header>
+
+<div class="grid">
+
+  <!-- Stats -->
+  <div class="card">
+    <div class="card-title">📊 الإحصائيات</div>
+    <div class="stats-row">
+      <div class="stat-box">
+        <div class="stat-val green" id="s-wins">0</div>
+        <div class="stat-lbl">WIN</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val red" id="s-losses">0</div>
+        <div class="stat-lbl">LOSS</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val blue" id="s-total">0</div>
+        <div class="stat-lbl">TOTAL</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val yellow" id="s-wr">0%</div>
+        <div class="stat-lbl">WIN RATE</div>
+      </div>
+    </div>
+    <div class="wr-bar"><div class="wr-fill" id="wr-fill" style="width:0%"></div></div>
+    <div style="color:var(--gray);font-size:11px;margin-top:8px">
+      الرصيد: <span id="s-balance" class="green">—</span>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card">
+    <div class="card-title">🎮 التحكم</div>
+    <div class="btn-row">
+      <button class="btn-green" onclick="sendCmd('start')">▶ تشغيل</button>
+      <button class="btn-red"   onclick="sendCmd('stop')">⏹ إيقاف</button>
+      <button class="btn-gray"  onclick="sendCmd('pause')">⏸ إيقاف مؤقت</button>
+      <button class="btn-blue"  onclick="reloadScript()">🔄 تحديث السكربت</button>
+    </div>
+    <div id="script-version">الإصدار: جاري التحميل...</div>
+    <div style="margin-top:12px">
+      <label style="color:var(--gray);font-size:11px">مبلغ التداول:</label>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <input id="amount-input" type="number" placeholder="1" min="1" step="1"
+          style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;width:90px;font-family:inherit">
+        <button class="btn-gray" onclick="setAmount()">تطبيق</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="card" style="grid-column: span 2">
+    <div class="card-title" style="display:flex;justify-content:space-between">
+      <span>📋 السجلات</span>
+      <button class="btn-gray" style="padding:3px 10px;font-size:11px" onclick="clearLogs()">مسح</button>
+    </div>
+    <div id="log-box"></div>
+  </div>
+
+  <!-- Trades -->
+  <div class="card" style="grid-column: span 2">
+    <div class="card-title">📈 آخر الصفقات</div>
+    <div id="trades-box">
+      <table>
+        <thead>
+          <tr>
+            <th>الوقت</th><th>الاتجاه</th><th>النتيجة</th>
+            <th>الثقة</th><th>المدة</th>
+          </tr>
+        </thead>
+        <tbody id="trades-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Bottom bar -->
+<div id="conn-bar">
+  <span>WS:</span>
+  <input id="ws-url-input" type="text" placeholder="ws://localhost:3000" value="">
+  <button class="btn-blue" style="padding:4px 12px;font-size:12px" onclick="connectWS()">اتصال</button>
+  <span id="ws-status" style="margin-right:auto">غير متصل</span>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let ws = null;
+const MAX_LOG_ENTRIES = 200;
+
+// ── Auto-detect server URL ────────────────────────────────────────────────────
+const defaultWS = location.protocol === 'https:'
+  ? 'wss://' + location.host
+  : 'ws://' + (location.host || 'localhost:3000');
+document.getElementById('ws-url-input').value = defaultWS;
+
+window.addEventListener('load', () => connectWS());
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (ws) { ws.close(); ws = null; }
+  const url = document.getElementById('ws-url-input').value.trim();
+  try {
+    ws = new WebSocket(url);
+    document.getElementById('ws-status').textContent = 'جاري الاتصال...';
+  } catch(e) { toast('فشل الاتصال: ' + e.message, 'red'); return; }
+
+  ws.onopen = () => {
+    document.getElementById('ws-status').textContent = 'متصل ✓';
+    toast('تم الاتصال بالخادم', 'green');
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-status').textContent = 'مقطوع — إعادة محاولة...';
+    setBotOnline(false);
+    setTimeout(connectWS, 4000);
+  };
+
+  ws.onerror = () => {};
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    switch (msg.type) {
+      case 'init':
+        applyState(msg.state);
+        break;
+      case 'bot_connected':
+        setBotOnline(true, msg.ip);
+        toast('✅ البوت متصل', 'green');
+        break;
+      case 'bot_disconnected':
+        setBotOnline(false);
+        toast('❌ البوت انقطع', 'red');
+        break;
+      case 'log':
+        appendLog(msg.data);
+        break;
+      case 'stats':
+        updateStats(msg.data);
+        break;
+      case 'trade':
+        appendTrade(msg.data);
+        break;
+      case 'status':
+        setStatus(msg.status);
+        break;
+      case 'script_updated':
+        document.getElementById('script-version').textContent =
+          'الإصدار: ' + msg.version.slice(0,16) + '...';
+        toast('📦 السكربت تم تحديثه', 'blue');
+        break;
+    }
+  };
+}
+
+// ── State apply ───────────────────────────────────────────────────────────────
+function applyState(s) {
+  setBotOnline(s.botConnected);
+  setStatus(s.botStatus);
+  updateStats(s.stats);
+  if (s.scriptVersion) {
+    document.getElementById('script-version').textContent =
+      'الإصدار: ' + s.scriptVersion.slice(0,16) + '...';
+  }
+  (s.logs || []).forEach(appendLog);
+  (s.trades || []).forEach(appendTrade);
+}
+
+function setBotOnline(on, ip) {
+  const badge = document.getElementById('conn-badge');
+  badge.textContent = on ? 'ONLINE' : 'OFFLINE';
+  badge.className = 'conn-badge' + (on ? ' online' : '');
+  if (ip) document.getElementById('bot-ip').textContent = ip;
+  else if (!on) document.getElementById('bot-ip').textContent = '';
+}
+
+function setStatus(s) {
+  const chip = document.getElementById('status-chip');
+  chip.textContent = s;
+  chip.className = 'status-chip ' + (s || '').toLowerCase();
+}
+
+function updateStats(d) {
+  if (!d) return;
+  if (d.wins    !== undefined) document.getElementById('s-wins').textContent    = d.wins;
+  if (d.losses  !== undefined) document.getElementById('s-losses').textContent  = d.losses;
+  if (d.total   !== undefined) document.getElementById('s-total').textContent   = d.total;
+  if (d.winRate !== undefined) {
+    document.getElementById('s-wr').textContent = d.winRate + '%';
+    document.getElementById('wr-fill').style.width = Math.min(d.winRate, 100) + '%';
+    document.getElementById('wr-fill').style.background =
+      d.winRate >= 55 ? 'var(--green)' : d.winRate >= 45 ? 'var(--yellow)' : 'var(--red)';
+  }
+  if (d.balance !== undefined)
+    document.getElementById('s-balance').textContent = '$' + parseFloat(d.balance).toFixed(2);
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────────────
+const logBox = document.getElementById('log-box');
+let logCount = 0;
+
+function appendLog(entry) {
+  const div = document.createElement('div');
+  div.className = 'log-entry ' + (entry.type || 'info');
+  const d = new Date(entry.ts);
+  const ts = d.toTimeString().slice(0,8);
+  div.innerHTML = `<span class="log-ts">${ts}</span><span class="log-msg">${escHtml(entry.msg)}</span>`;
+  logBox.appendChild(div);
+  logCount++;
+  while (logCount > MAX_LOG_ENTRIES) {
+    logBox.removeChild(logBox.firstChild);
+    logCount--;
+  }
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function clearLogs() { logBox.innerHTML = ''; logCount = 0; }
+
+// ── Trades ────────────────────────────────────────────────────────────────────
+const tbody = document.getElementById('trades-tbody');
+
+function appendTrade(t) {
+  const tr  = document.createElement('tr');
+  tr.className = t.result === 'WIN' ? 'win-row' : 'loss-row';
+  const d = new Date(t.ts);
+  tr.innerHTML = `
+    <td>${d.toTimeString().slice(0,8)}</td>
+    <td>${t.dir || '—'}</td>
+    <td>${t.result || '—'}</td>
+    <td>${t.conf != null ? t.conf + '%' : '—'}</td>
+    <td>${t.duration != null ? t.duration + 's' : '—'}</td>`;
+  tbody.insertBefore(tr, tbody.firstChild);
+  if (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+function sendCmd(cmd, payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('غير متصل', 'red'); return; }
+  ws.send(JSON.stringify({ type: 'command', cmd, payload }));
+  toast('تم إرسال: ' + cmd, 'blue');
+}
+
+function reloadScript() {
+  fetch('/api/script/reload', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => toast('تم تحديث السكربت: ' + (d.version || '').slice(0,12), 'green'))
+    .catch(e => toast('خطأ: ' + e.message, 'red'));
+}
+
+function setAmount() {
+  const v = parseFloat(document.getElementById('amount-input').value);
+  if (!v || v < 1) { toast('أدخل مبلغاً صحيحاً', 'red'); return; }
+  sendCmd('set_amount', { amount: v });
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let _toastTimer;
+function toast(msg, color = 'blue') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.background = color === 'green' ? 'var(--green)' :
+                         color === 'red'   ? 'var(--red)'   : 'var(--blue)';
+  el.style.color  = color === 'green' ? '#000' : '#fff';
+  el.style.opacity = '1';
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { el.style.opacity = '0'; }, 3000);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>

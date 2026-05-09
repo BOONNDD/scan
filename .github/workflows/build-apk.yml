@@ -1,0 +1,67 @@
+name: Build Supreme Bot APK
+
+on:
+  push:
+    branches:
+      - claude/supreme-pred-v2-engine-UiUx4
+    paths:
+      - 'bot-android/android/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Show pre-installed Android SDK info
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls $ANDROID_SDK_ROOT/platforms/ 2>/dev/null || echo "No platforms dir"
+          ls $ANDROID_SDK_ROOT/build-tools/ 2>/dev/null || echo "No build-tools dir"
+
+      - name: Install required Android SDK components
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            --sdk_root=$ANDROID_SDK_ROOT 2>/dev/null || true
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > bot-android/android/local.properties
+          cat bot-android/android/local.properties
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x bot-android/android/gradlew
+
+      - name: Build Debug APK
+        working-directory: bot-android/android
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            2>&1 | tail -100
+        env:
+          GRADLE_OPTS: "-Xmx3g -XX:MaxMetaspaceSize=512m"
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: SupremeBot-debug
+          path: bot-android/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
