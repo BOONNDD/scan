@@ -16,13 +16,6 @@ class ExtensionManagerActivity : AppCompatActivity() {
     private lateinit var listView   : ListView
     private lateinit var emptyText  : TextView
 
-    companion object {
-        private const val REQ_PICK_FILE = 1001
-        private const val CWS_DL = "https://clients2.google.com/service/update2/crx" +
-            "?response=redirect&acceptformat=crx3&prodversion=49.0" +
-            "&x=id%%3D%s%%26installsource%%3Dondemand%%26uc"
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         extManager = ExtensionManager(this)
@@ -233,6 +226,10 @@ class ExtensionManagerActivity : AppCompatActivity() {
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val REQ_PICK_FILE = 1001
+        private const val CWS_DL = "https://clients2.google.com/service/update2/crx" +
+            "?response=redirect&acceptformat=crx3&prodversion=49.0" +
+            "&x=id%%3D%s%%26installsource%%3Dondemand%%26uc"
         private const val BG_DARK  = 0xFF0a0e1a.toInt()
         private const val BG_CARD  = 0xFF111827.toInt()
         private const val GREEN    = 0xFF00FF88.toInt()
