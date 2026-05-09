@@ -292,6 +292,10 @@
     CR15_TRADE_SEC          : 3,     // مدة الصفقة 3 ثوانٍ
     CR15_AMOUNT             : 0,     // 0 = استخدم tradeAmount الافتراضي
 
+    // ─── CC3: عكس لون الشمعة عند الثانية ٣ من العد التنازلي ──────────
+    CC3_ENABLED             : true,  // عند countdown=3 → عكس لون الشمعة (بلا فلاتر)
+    CC3_AMOUNT              : 0,     // 0 = استخدم tradeAmount الافتراضي
+
     // ─── نظام التعلم التكيفي ────────────────────────────────────────
     SUPREME_LEARN_RATE      : 0.015, // معدل التعلم (محافظ لتجنب التذبذب)
     SUPREME_ALGO_WEIGHT_MIN : 0.30,  // الحد الأدنى لوزن الخوارزمية
@@ -2229,6 +2233,13 @@
     const st = chaforState[a], prev = st.prev;
     st.prev = seconds;
     if (a === activeAsset) updateCountdownDisplay(seconds);
+
+    // ── CC3: عند الثانية ٣ من العد التنازلي → عكس لون الشمعة الحالية ─
+    // candlePeriod > 3 يضمن أننا في منتصف شمعة أطول من ٣ ثواني (ليس بداية شمعة جديدة)
+    if (seconds === 3 && candlePeriod > 3 && a === activeAsset && autoTrade) {
+      _cc3Fire(a);
+    }
+
     const isReset = prev!==null && seconds>prev+2 && prev<=12;
     if (!isReset) return;
     st.resetAt = Date.now();
@@ -2259,6 +2270,8 @@
 
   // ── CR15: حالة استراتيجية عكس الشمعة ─────────────────────────────
   let _cr15LastFire = 0;  // timestamp آخر إطلاق
+  // ── CC3: حالة استراتيجية عكس اللون عند الثانية ٣ ─────────────────
+  let _cc3LastFireCandle = 0;  // startTime الشمعة التي أُطلق فيها CC3 آخر مرة (لمنع التكرار)
 
   function closeCurrentCandle(asset) {
     const cc = currentCandles[asset];
@@ -2546,6 +2559,55 @@
       );
     } catch(e) {
       addLog('❌ CR15 خطأ تنفيذ: ' + e.message, 'error');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § CC3  عكس لون الشمعة عند الثانية ٣ من العد التنازلي (بلا فلاتر)
+  // ══════════════════════════════════════════════════════════════════════
+  // المنطق: شمعة حمراء عند countdown=3 → شراء (3ث) | شمعة خضراء → بيع (3ث)
+  // يُطلق مرة واحدة فقط لكل شمعة | بلا فلاتر SUPREME-PRED/H4/H5
+  function _cc3Fire(asset) {
+    if (!CFG.CC3_ENABLED) return;
+    if (asset !== activeAsset) return;
+    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) return;
+    if (tradeExec) return;
+
+    const cc = currentCandles[asset];
+    if (!cc || cc.prices.length < 2) return;
+    // منع التكرار: شمعة واحدة = إطلاق واحد
+    if (cc.startTime === _cc3LastFireCandle) return;
+
+    // لون الشمعة الحالية: أول سعر (open) مقارنة بآخر سعر (current)
+    const open    = cc.prices[0];
+    const current = cc.prices[cc.prices.length - 1];
+    const isBull  = current >= open;
+
+    // الاتجاه المعاكس: خضراء → بيع | حمراء → شراء
+    const direction = isBull ? 'SELL' : 'BUY';
+    const action    = direction === 'BUY' ? 'call' : 'put';
+    const amt       = CFG.CC3_AMOUNT > 0 ? CFG.CC3_AMOUNT : tradeAmount;
+
+    const reqId  = _nextReqId();
+    const packet = '42["openOrder",{"asset":"' + asset +
+                   '","amount":' + amt +
+                   ',"action":"' + action +
+                   '","isDemo":' + isDemo +
+                   ',"requestId":' + reqId +
+                   ',"optionType":100,"time":3}]';
+    try {
+      tradeWSOrig(packet);
+      _cc3LastFireCandle = cc.startTime;
+      tradeExec = true; updateTradeBtn();
+      setTimeout(() => { tradeExec = false; updateTradeBtn(); }, 4000);
+      addLog(
+        '⏰ CC3 ' + (direction === 'BUY' ? '🟢 شراء' : '🔴 بيع') +
+        ' — شمعة ' + (isBull ? 'خضراء↓بيع' : 'حمراء↑شراء') +
+        ' | عند ث٣ | $' + amt,
+        'signal'
+      );
+    } catch(e) {
+      addLog('❌ CC3 خطأ: ' + e.message, 'error');
     }
   }
 
