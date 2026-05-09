@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId "com.supremebot"
-        minSdk 26          // Android 8.0+ (java.net.http.WebSocket requires API 26+... actually 26 is fine with OkHttp)
+        minSdk 24
         targetSdk 34
         versionCode 1
         versionName "1.0.0"

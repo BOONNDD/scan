@@ -6,7 +6,7 @@ on:
       - claude/supreme-pred-v2-engine-UiUx4
     paths:
       - 'bot-android/android/**'
-  workflow_dispatch:   # زر يدوي من GitHub
+  workflow_dispatch:
 
 jobs:
   build:
@@ -21,27 +21,37 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: gradle
 
-      - name: Set up Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0'
 
       - name: Grant execute permission for gradlew
         run: chmod +x bot-android/android/gradlew
-        continue-on-error: true
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > bot-android/android/local.properties
 
       - name: Build Debug APK
         working-directory: bot-android/android
         run: ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m"
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: SupremeBot-debug
           path: bot-android/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      - name: Show APK info
+      - name: Build summary
         run: |
           APK=bot-android/android/app/build/outputs/apk/debug/app-debug.apk
-          echo "✅ APK built successfully"
-          echo "📦 Size: $(du -sh $APK | cut -f1)"
+          if [ -f "$APK" ]; then
+            SIZE=$(du -sh "$APK" | cut -f1)
+            echo "✅ APK built: $SIZE" >> $GITHUB_STEP_SUMMARY
+          fi
