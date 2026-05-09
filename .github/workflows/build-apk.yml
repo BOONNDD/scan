@@ -3,9 +3,11 @@ name: Build Supreme Bot APK
 on:
   push:
     branches:
+      - main
       - claude/supreme-pred-v2-engine-UiUx4
     paths:
       - 'bot-android/android/**'
+      - 'candle_V12_SUPREME.js'
   workflow_dispatch:
 
 jobs:
