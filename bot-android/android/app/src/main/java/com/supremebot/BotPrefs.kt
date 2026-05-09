@@ -12,7 +12,7 @@ object BotPrefs {
     }
 
     var serverWsUrl: String
-        get() = prefs.getString("server_ws_url", "ws://localhost:3000") ?: "ws://localhost:3000"
+        get() = prefs.getString("server_ws_url", "wss://pocket-option-bot--azzideenalhwry.replit.app/ws") ?: "wss://pocket-option-bot--azzideenalhwry.replit.app/ws"
         set(v) { prefs.edit().putString("server_ws_url", v).apply() }
 
     var scriptUrl: String
