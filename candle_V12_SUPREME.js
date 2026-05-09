@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | 30-Algo Weighted Engine | 70%+ Win Rate
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.0.0
+// @version      12.1.0
 // @description  V12: SUPREME-PRED v2 | Group A/B/C/D Weighted Voting | Kalman | Hurst R/S | Regime Classifier | Adaptive Learning | 70% Confidence Gate
 // @author       aoirusra
 // @match        *://pocketoption.com/*
