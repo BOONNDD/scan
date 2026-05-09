@@ -24,12 +24,26 @@
 
         <TextView
             android:id="@+id/statusText"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="Connecting..."
             android:textColor="#888888"
             android:textSize="11sp"
             android:gravity="center_vertical" />
+
+        <TextView
+            android:id="@+id/btnRefreshScript"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:text="⟳"
+            android:textSize="20sp"
+            android:textColor="#E94560"
+            android:gravity="center"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
     </LinearLayout>
 
     <WebView

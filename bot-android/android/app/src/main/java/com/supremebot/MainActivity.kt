@@ -21,6 +21,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var statusText: TextView
+    private lateinit var btnRefreshScript: TextView
 
     private var botService: BotService? = null
     private var serviceConnected = false
@@ -51,6 +52,18 @@ class MainActivity : AppCompatActivity() {
 
         webView = findViewById(R.id.webView)
         statusText = findViewById(R.id.statusText)
+        btnRefreshScript = findViewById(R.id.btnRefreshScript)
+
+        btnRefreshScript.setOnClickListener {
+            btnRefreshScript.isEnabled = false
+            btnRefreshScript.alpha = 0.3f
+            statusText.text = "Updating script..."
+            scriptManager?.forceRefresh()
+            btnRefreshScript.postDelayed({
+                btnRefreshScript.isEnabled = true
+                btnRefreshScript.alpha = 1f
+            }, 3000)
+        }
 
         BotPrefs.init(applicationContext)
         setupWebView()

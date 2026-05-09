@@ -35,7 +35,15 @@ class ScriptManager(
         scope.cancel()
     }
 
+    fun forceRefresh() {
+        scope.launch { fetchScript(force = true) }
+    }
+
     private suspend fun checkForUpdate() = withContext(Dispatchers.IO) {
+        fetchScript(force = false)
+    }
+
+    private suspend fun fetchScript(force: Boolean) = withContext(Dispatchers.IO) {
         lastCheckMs = System.currentTimeMillis()
         onChecked()
 
@@ -46,7 +54,7 @@ class ScriptManager(
         conn.setRequestProperty("User-Agent", "SupremeBot-Android/1.0")
 
         val storedEtag = BotPrefs.scriptVersion
-        if (storedEtag != null) {
+        if (!force && storedEtag != null) {
             conn.setRequestProperty("If-None-Match", storedEtag)
         }
 
