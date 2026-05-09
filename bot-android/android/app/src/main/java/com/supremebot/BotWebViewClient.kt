@@ -11,8 +11,9 @@ import android.webkit.WebViewClient
  * 3. Intercepts page navigation to stay on Pocket Option
  */
 class BotWebViewClient(
-    private val getScript : () -> String?,
-    private val onLog     : (String) -> Unit,
+    private val getScript    : () -> String?,
+    private val onLog        : (String) -> Unit,
+    private val onPageLoaded : (() -> Unit)? = null,
 ) : WebViewClient() {
 
     companion object {
@@ -24,6 +25,7 @@ class BotWebViewClient(
     // Called once the DOM is ready
     override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
+        onPageLoaded?.invoke()
 
         if (!url.contains(TARGET_HOST)) return
 

@@ -12,8 +12,15 @@ class ScriptManager(
     private val pollIntervalMs : Long = 5 * 60_000L,
     private val onUpdate       : (script: String, version: String) -> Unit,
     private val onLog          : (String) -> Unit,
+    private val onChecked      : (() -> Unit)? = null,
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** Timestamp (ms) of the most recent completed poll cycle. */
+    @Volatile var lastCheckMs: Long = System.currentTimeMillis()
+        private set
+
+    val pollIntervalMsPublic: Long get() = pollIntervalMs
 
     fun start() {
         scope.launch {
@@ -26,6 +33,8 @@ class ScriptManager(
 
             while (isActive) {
                 fetchIfNew()
+                lastCheckMs = System.currentTimeMillis()
+                onChecked?.invoke()
                 delay(pollIntervalMs)
             }
         }

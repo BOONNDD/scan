@@ -4,15 +4,18 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.webkit.*
 import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationCompat
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import kotlinx.coroutines.*
 import org.json.JSONObject
 
@@ -20,6 +23,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView       : WebView
     private lateinit var statusBar     : TextView
+    private lateinit var connDot       : View
+    private lateinit var updateTimer   : TextView
+    private lateinit var swipeRefresh  : SwipeRefreshLayout
     private lateinit var socketClient  : BotSocketClient
     private lateinit var scriptManager : ScriptManager
 
@@ -35,12 +41,22 @@ class MainActivity : AppCompatActivity() {
 
         BotPrefs.init(applicationContext)
 
-        webView   = findViewById(R.id.webview)
-        statusBar = findViewById(R.id.status_bar)
+        webView      = findViewById(R.id.webview)
+        statusBar    = findViewById(R.id.status_bar)
+        connDot      = findViewById(R.id.conn_dot)
+        updateTimer  = findViewById(R.id.update_timer)
+        swipeRefresh = findViewById(R.id.swipe_refresh)
 
+        setupSwipeRefresh()
         setupWebView()
         setupSocketClient()
         setupScriptManager()
+        startStatusPolling()
+
+        findViewById<TextView>(R.id.btn_refresh).setOnClickListener { webView.reload() }
+
+        swipeRefresh.setColorSchemeColors(0xFF00FF88.toInt())
+        swipeRefresh.setProgressBackgroundColorSchemeColor(0xFF111827.toInt())
 
         webView.loadUrl("https://pocketoption.com/en/login/")
         showPersistentNotification()
@@ -71,6 +87,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── SwipeRefreshLayout ────────────────────────────────────────────────────
+
+    private fun setupSwipeRefresh() {
+        swipeRefresh.setOnRefreshListener {
+            webView.reload()
+            // spinner stops in onPageFinished via BotWebViewClient.onPageLoaded callback
+        }
+    }
+
     // ── WebView ───────────────────────────────────────────────────────────────
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -96,8 +121,9 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(jsInterface, "Android")
 
         webView.webViewClient = BotWebViewClient(
-            getScript = { currentScript },
-            onLog     = { msg -> handleLog(msg, "system") },
+            getScript    = { currentScript },
+            onLog        = { msg -> handleLog(msg, "system") },
+            onPageLoaded = { runOnUiThread { swipeRefresh.isRefreshing = false } },
         )
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -157,6 +183,36 @@ class MainActivity : AppCompatActivity() {
             onLog = { msg -> runOnUiThread { handleLog(msg, "system") } },
         )
         scriptManager.start()
+    }
+
+    // ── Polling: connection dot + update timer ────────────────────────────────
+
+    private fun startStatusPolling() {
+        scope.launch {
+            while (isActive) {
+                updateConnDot(socketClient.isConnected())
+                updateCountdown()
+                delay(1_000)
+            }
+        }
+    }
+
+    private fun updateConnDot(connected: Boolean) {
+        val dot = connDot.background as? GradientDrawable ?: return
+        dot.setColor(if (connected) 0xFF00FF88.toInt() else 0xFFFF4444.toInt())
+    }
+
+    private fun updateCountdown() {
+        val elapsed   = System.currentTimeMillis() - scriptManager.lastCheckMs
+        val remaining = scriptManager.pollIntervalMsPublic - elapsed
+        if (remaining <= 0) {
+            updateTimer.text = "🔄 ..."
+        } else {
+            val secs = (remaining / 1000).toInt()
+            val m    = secs / 60
+            val s    = secs % 60
+            updateTimer.text = "🔄 $m:%02d".format(s)
+        }
     }
 
     // ── Event handlers ────────────────────────────────────────────────────────
@@ -242,7 +298,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ── Persistent notification (keeps screen on / reminds user) ──────────────
+    // ── Persistent notification ───────────────────────────────────────────────
 
     private fun showPersistentNotification() {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
