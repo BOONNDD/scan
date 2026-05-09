@@ -8,7 +8,6 @@ import android.webkit.WebViewClient
 import org.json.JSONObject
 
 class BotWebViewClient(
-    private val socketClient: BotSocketClient,
     private val onPageReady: () -> Unit
 ) : WebViewClient() {
 

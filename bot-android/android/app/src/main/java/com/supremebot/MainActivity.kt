@@ -80,7 +80,6 @@ class MainActivity : AppCompatActivity() {
         WebView.setWebContentsDebuggingEnabled(false)
 
         val wvc = BotWebViewClient(
-            socketClient = createDummySocketForWVC(),
             onPageReady = { Log.i(TAG, "Page ready for trading") }
         )
         webViewClient = wvc
@@ -88,14 +87,6 @@ class MainActivity : AppCompatActivity() {
 
         webView.loadUrl(POCKET_OPTION_URL)
     }
-
-    private fun createDummySocketForWVC() = object : BotSocketClient(
-        serverUrl = BotPrefs.serverUrl,
-        onCommand = { _, _ -> },
-        onReloadScript = { _, _ -> },
-        onConnected = {},
-        onDisconnected = {}
-    ) {}
 
     private fun setupServiceCallbacks() {
         val service = botService ?: return
