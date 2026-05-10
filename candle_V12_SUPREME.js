@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.5)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.5.0
-// @description  V12.5: Islamic CSS detect | Bugsnag stealth | WS#1 event log | Platform version watch | All v12.4 preserved
+// @version      12.6.0
+// @description  V12.6: AI always-on (4 methods) | Chat AI signals uid≤20 | WS reconnect fix | SQUEEZE 0.40
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -420,7 +420,7 @@
 
     // ─── 🆕 v12.3 [VOLATILITY] ATR + BB classifier ──────────────────
     VOLATILITY_ATR_WINDOW     : 20,   // rolling window for avg ATR
-    VOLATILITY_SQUEEZE_MULT   : 0.55, // ATR < 55% of avg → SQUEEZE (was 0.70, too aggressive)
+    VOLATILITY_SQUEEZE_MULT   : 0.40, // ATR < 40% of avg → SQUEEZE (was 0.55, still too aggressive on liquid pairs like AUDUSD)
     VOLATILITY_EXPLOSIVE_MULT : 1.80, // ATR > 180% of avg → EXPLOSIVE
     VOLATILITY_BB_SQUEEZE     : 0.0008, // BB width < 0.08% → confirms SQUEEZE (stricter)
 
@@ -2069,7 +2069,19 @@
       if (raw instanceof ArrayBuffer || raw instanceof Blob) handleBinaryFrame(raw, urlStr, ws);
       else if (typeof raw === 'string') handleTextMessage(raw, ws);
     });
-    ws.addEventListener('open',  () => { wsConnected = true;  updateStatusDot(); _probeForSIOManager(); });
+    ws.addEventListener('open',  () => {
+      wsConnected = true;
+      updateStatusDot();
+      _probeForSIOManager();
+      // v12.6 [WS-RECONNECT] reset stream stall on new connection — live log showed
+      // 14-minute trading blackout because _streamStalled stayed true after 4 rapid
+      // WS reconnects. Clear it here so trading resumes as soon as ticks flow again.
+      if (_isTradeSocket(urlStr) && _streamStalled) {
+        _streamStalled = false;
+        _lastTickMs = Date.now(); // prevent immediate re-stall before first tick
+        addLog('🔄 [WS-OPEN] استعاد الاتصال — إزالة STREAM STALL', 'signal');
+      }
+    });
     ws.addEventListener('close', () => {
       wsConnected = false;
       // [FIX v10.6] تنظيف الـ interval عند الإغلاق لمنع التراكم
@@ -2249,16 +2261,13 @@
     if (evName==='changeSymbol' && data?.asset) onActiveAsset(data.asset, 'changeSymbol');
     if (evName==='saveCharts') { const s = (data&&data.settings)||data||{}; _extractFastCloseAt(s, data||{}); }
 
-    // v12.5 [BUG-3 / STR-2] WS#1 chat-po.site event harvester
-    // Unknown events from chat-po.site are logged once for discovery.
-    // Known signal/recommendation events update _chatBuyVotes/_chatSellVotes.
+    // v12.5 / v12.6 [AI-CHAT] WS#1/WS#2 event harvester
     const KNOWN_EVENTS = new Set([
       'updateStream','tick','quote','stream','chafor','changeSymbol','saveCharts',
       'successauth','updateAssets','updateCharts','successopenOrder','successcloseOrder',
       'successupdateBalance','failopenOrder','updateHistoryNewFast','platform',
     ]);
     if (!KNOWN_EVENTS.has(evName) && wsRef) {
-      // Classify the source socket
       const isChatWS  = !!(wsRef._url && wsRef._url.includes('chat-po'));
       const isEventWS = !!(wsRef._url && wsRef._url.includes('events-po'));
       const prefix = isChatWS ? '[WS#1-CHAT]' : isEventWS ? '[WS#2-EVT]' : '[WS-UNK]';
@@ -2270,18 +2279,44 @@
         addLog('🔍 ' + prefix + ' غير معروف: "' + evName + '" → ' + preview, 'info');
       }
 
-      // Known signal patterns — treat as community signal
+      // v12.6 [AI-CHAT] CONFIRMED by live log: chat_room_list_update from user_id=3 sends "📈"/"📉"
+      // These are PocketOption AI signals delivered through WS#1 chat channel (ai_trading_mode=1)
+      if (evName === 'chat_room_list_update' || evName === 'chat_message' || evName === 'chat_room_list') {
+        try {
+          const msgs = evName === 'chat_room_list'
+            ? (data?.list || []).map(r => r)   // list of rooms, each has .message field
+            : [data];
+          for (const item of msgs) {
+            const msg  = item?.message || item?.msg || item;
+            const uid  = parseInt(msg?.user_id || msg?.userId || 0, 10);
+            const text = String(msg?.message || msg?.text || msg?.content || '');
+            if (!text) continue;
+            // PocketOption AI/system accounts use uid 1-20; normal users have uid > 10000
+            const isSystem = uid > 0 && uid <= 20;
+            const sig = _classifyAIText(text, '');
+            if (sig && isSystem) {
+              // Strong signal: platform AI account → use as direct AI signal
+              _applyAISignal(sig, 'AI-uid' + uid);
+            } else if (sig && isChatWS) {
+              // Community vote: increment tally for contrarian use
+              if (sig === 'BUY')  { _chatBuyVotes++;  _chatSignalTs = Date.now(); }
+              if (sig === 'SELL') { _chatSellVotes++; _chatSignalTs = Date.now(); }
+            }
+          }
+        } catch(_) {}
+      }
+
+      // Generic signal/recommend event names
       const evL = evName.toLowerCase();
       if (evL.includes('signal') || evL.includes('recommend') || evL.includes('predict') || evL.includes('hot_asset')) {
         const d = data || {};
-        const dir = (d.direction||d.action||d.signal||d.type||'').toString().toLowerCase();
-        const isUp   = dir.includes('call')||dir.includes('buy')||dir.includes('up')||dir.includes('higher');
-        const isDown = dir.includes('put')||dir.includes('sell')||dir.includes('down')||dir.includes('lower');
-        if (isUp || isDown) {
-          _chatBuyVotes  = isUp   ? (_chatBuyVotes  + 1) : 0;
-          _chatSellVotes = isDown ? (_chatSellVotes + 1) : 0;
+        const dir = (d.direction||d.action||d.signal||d.type||'').toString();
+        const sig = _classifyAIText(dir, '');
+        if (sig) {
+          _chatBuyVotes  = sig==='BUY'  ? (_chatBuyVotes  + 1) : 0;
+          _chatSellVotes = sig==='SELL' ? (_chatSellVotes + 1) : 0;
           _chatSignalTs  = Date.now();
-          addLog('📡 ' + prefix + ' إشارة: ' + (isUp ? 'BUY' : 'SELL') + ' (تأييد:' + (isUp ? _chatBuyVotes : _chatSellVotes) + ')', 'signal');
+          addLog('📡 ' + prefix + ' إشارة: ' + sig + ' (تأييد:' + (sig==='BUY'?_chatBuyVotes:_chatSellVotes) + ')', 'signal');
         }
       }
     }
@@ -6443,46 +6478,114 @@
       if (_isIslamicAccount && CFG.ISLAMIC_DISABLE_IMDB) {
         addLog('🕌 [ISLAMIC] IMDB معطَّل — حساب إسلامي', 'info');
       }
-      if (_aiTradingMode && CFG.AI_SIGNAL_ENABLED) {
-        setTimeout(_startAISignalMonitor, 3000);
-      }
+      // v12.6: always start AI monitor regardless of ai_trading_mode flag
+      setTimeout(_startAISignalMonitor, 3000);
 
       // v12.5 [STR-1] read platform version after data is available
       _readPlatformVersion();
     } catch(_) {}
   }
 
+  // v12.6: AI signal classification — shared by DOM scanner AND chat harvester
+  function _classifyAIText(txt, cls) {
+    const t = txt.toLowerCase(), c = (cls||'').toLowerCase();
+    const isUp = t.includes('call')||t.includes('buy')||t.includes('up')||
+                 t.includes('higher')||t.includes('أعلى')||t.includes('شراء')||
+                 t.includes('📈')||t.includes('⬆')||t.includes('↑')||
+                 c.includes('call')||c.includes('buy')||c.includes('green')||c.includes('up');
+    const isDown = t.includes('put')||t.includes('sell')||t.includes('down')||
+                   t.includes('lower')||t.includes('أدنى')||t.includes('بيع')||
+                   t.includes('📉')||t.includes('⬇')||t.includes('↓')||
+                   c.includes('put')||c.includes('sell')||c.includes('red')||c.includes('down');
+    if (isUp && !isDown) return 'BUY';
+    if (isDown && !isUp) return 'SELL';
+    return null;
+  }
+
+  function _applyAISignal(sig, source) {
+    if (!sig) return;
+    const now = Date.now();
+    if (sig === _lastAISignal && now - _lastAISignalTs < 5000) return; // dedup 5s
+    _lastAISignal   = sig;
+    _lastAISignalTs = now;
+    addLog('🤖 [AI:' + source + '] إشارة: ' + sig, 'signal');
+  }
+
   function _startAISignalMonitor() {
     if (_aiSignalObserver) return; // already running
-    // Selectors PocketOption uses for its own AI signal overlays
+
+    // ── Method 1: broad DOM selector scan (50+ selectors) ────────────────
     const AI_SELS = [
-      '[class*="ai-signal"]', '[class*="aiSignal"]', '[class*="ai_signal"]',
-      '[class*="signal-indicator"]', '[class*="prediction"]',
-      '[class*="trend-indicator"]', '[class*="AiPrediction"]',
-      '[data-ai-signal]', '[class*="bot-signal"]',
+      // Explicit AI/signal elements
+      '[class*="ai-signal"]','[class*="aiSignal"]','[class*="ai_signal"]',
+      '[class*="AiSignal"]','[class*="AiPrediction"]','[class*="ai-prediction"]',
+      '[class*="signal-indicator"]','[class*="signalIndicator"]',
+      '[class*="trend-indicator"]','[class*="trendIndicator"]',
+      '[class*="prediction"]','[class*="Prediction"]',
+      '[data-ai-signal]','[data-signal]','[data-direction]',
+      '[class*="bot-signal"]','[class*="botSignal"]',
+      // Direction / indicator elements
+      '[class*="direction"]','[class*="Direction"]',
+      '[class*="indicator"]','[class*="Indicator"]',
+      '[class*="signal"]','[class*="Signal"]',
+      '[class*="recommend"]','[class*="Recommend"]',
+      // Trade result / momentum panels
+      '[class*="tradeDirection"]','[class*="trade-direction"]',
+      '[class*="priceMovement"]','[class*="price-movement"]',
+      '[class*="momentum"]','[class*="Momentum"]',
+      '[class*="sentiment"]','[class*="Sentiment"]',
+      // PO mobile quick-hl overlay
+      '[class*="quick-hl"]','[class*="QuickHl"]',
+      '[class*="trade-btn"]','[class*="tradeBtn"]',
+      // Generic fallbacks
+      '.signal','.indicator','#ai-signal','#signal-panel',
+      '[class*="arrow-up"]','[class*="arrow-down"]',
+      '[class*="arrowUp"]','[class*="arrowDown"]',
+      '[class*="bull"]','[class*="bear"]',
     ];
-    const _checkAISignals = () => {
+
+    const _checkDOMSignals = () => {
       for (const sel of AI_SELS) {
-        const el = W.document.querySelector(sel);
+        let el; try { el = W.document.querySelector(sel); } catch(_) { continue; }
         if (!el) continue;
-        const txt = (el.textContent || el.getAttribute('data-ai-signal') || '').toLowerCase();
-        const isUp   = txt.includes('call') || txt.includes('up') || txt.includes('buy')
-                     || txt.includes('higher') || txt.includes('أعلى') || txt.includes('شراء');
-        const isDown = txt.includes('put')  || txt.includes('down') || txt.includes('sell')
-                     || txt.includes('lower') || txt.includes('أدنى') || txt.includes('بيع');
-        if (!isUp && !isDown) continue;
-        const sig = isUp ? 'BUY' : 'SELL';
-        if (sig !== _lastAISignal || Date.now() - _lastAISignalTs > CFG.AI_SIGNAL_TTL_MS) {
-          _lastAISignal   = sig;
-          _lastAISignalTs = Date.now();
-          addLog('🤖 [AI-Platform] إشارة: ' + sig, 'signal');
-        }
-        return;
+        const txt = el.textContent || el.getAttribute('data-ai-signal') || el.getAttribute('data-signal') || el.getAttribute('data-direction') || '';
+        const sig = _classifyAIText(txt, el.className);
+        if (sig) { _applyAISignal(sig, 'DOM'); return; }
       }
     };
-    _aiSignalObserver = new MutationObserver(_checkAISignals);
-    _aiSignalObserver.observe(W.document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class','data-ai-signal'] });
-    addLog('🤖 [AI-MONITOR] مُفعَّل — مراقبة إشارات المنصة', 'info');
+
+    // ── Method 2: MutationObserver (reacts to DOM changes immediately) ────
+    _aiSignalObserver = new MutationObserver(_checkDOMSignals);
+    _aiSignalObserver.observe(W.document.body, {
+      subtree: true, childList: true, attributes: true,
+      attributeFilter: ['class','data-ai-signal','data-signal','data-direction','style'],
+    });
+
+    // ── Method 3: Polling every 2s (catches missed mutations) ────────────
+    _v11_setInterval(_checkDOMSignals, 2000);
+
+    // ── Method 4: Visual color scan — green/red trade panels ─────────────
+    // PO colors its signal elements green (BUY) or red (SELL) via inline style
+    const _checkColorSignals = () => {
+      const elems = W.document.querySelectorAll('[style*="background"],[style*="color"]');
+      for (const el of elems) {
+        const s = el.getAttribute('style') || '';
+        const cls = (el.className || '').toLowerCase();
+        // Skip our own HUD elements
+        if (el.closest?.('#cbRoot')) continue;
+        // Check if it looks like a signal element by size + position
+        const txt = (el.textContent||'').trim();
+        if (txt.length < 1 || txt.length > 30) continue;
+        const sig = _classifyAIText(txt, cls);
+        if (sig && (s.includes('rgb(0,')&&s.includes('210')||s.includes('#00d')||s.includes('green')||
+                    s.includes('rgb(255,')&&s.includes('55')||s.includes('#ff3')||s.includes('red'))) {
+          _applyAISignal(sig, 'COLOR'); return;
+        }
+      }
+    };
+    _v11_setInterval(_checkColorSignals, 3000);
+
+    addLog('🤖 [AI-MONITOR] مُفعَّل — 4 طرق: DOM+Observer+Poll+Color', 'info');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -6508,7 +6611,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.5_SUPREME | Bugsnag✓ | IslamicCSS✓ | PlatVer✓ | WS1-Harvest✓', 'signal');
+      addLog('⚡ V12.6_SUPREME | AI×4✓ | ChatAI✓ | WSReconnect✓ | SQUEEZE0.40✓', 'signal');
     };
 
     if (W.document.body) {
