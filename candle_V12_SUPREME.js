@@ -357,16 +357,16 @@
     SUPREME_ALGO_WEIGHT_MIN : 0.30,  // الحد الأدنى لوزن الخوارزمية
     SUPREME_ALGO_WEIGHT_MAX : 5.00,  // الحد الأقصى لوزن الخوارزمية
     SUPREME_REGIME_MIN_TRADES: 20,   // حد أدنى للصفقات قبل تقييم الأداء
-    SUPREME_REGIME_BLOCK_WR : 0.45,  // حجب النظام اذا معدل الفوز < 45%
+    SUPREME_REGIME_BLOCK_WR : 0.40,  // حجب النظام اذا معدل الفوز < 40% (was 0.45, too strict)
 
     // ─── ATR volatility threshold لتصنيف VOLATILE ──────────────────
     SUPREME_VOLATILE_ATR_MULT: 1.8,  // ATR > 1.8x المتوسط -> VOLATILE
 
     // ─── 🆕 v12.3 [VOLATILITY] ATR + BB classifier ──────────────────
     VOLATILITY_ATR_WINDOW     : 20,   // rolling window for avg ATR
-    VOLATILITY_SQUEEZE_MULT   : 0.70, // ATR < 70% of avg → SQUEEZE
+    VOLATILITY_SQUEEZE_MULT   : 0.55, // ATR < 55% of avg → SQUEEZE (was 0.70, too aggressive)
     VOLATILITY_EXPLOSIVE_MULT : 1.80, // ATR > 180% of avg → EXPLOSIVE
-    VOLATILITY_BB_SQUEEZE     : 0.0015, // BB width < 0.15% → confirms SQUEEZE
+    VOLATILITY_BB_SQUEEZE     : 0.0008, // BB width < 0.08% → confirms SQUEEZE (stricter)
 
     // ─── 🆕 v12.3 [ADAPTIVE CONF] adaptive minConfluence ────────────
     ADAPTIVE_CONF_ENABLED     : true,
@@ -2545,7 +2545,7 @@
         _phantomWeight    = Math.max(0.5, _phantomWeight - 0.10);
         // skip phantom injection for next 5 candles
         _phantomSkipUntil = Date.now() + (candlePeriod || 5) * 5000;
-        addLog('👻 точность штраф — skip 5 свечей | w=' + _phantomWeight.toFixed(2), 'info');
+        addLog('👻 دقة منخفضة — تخطي 5 شموع | w=' + _phantomWeight.toFixed(2), 'info');
       }
       _phantomPendingKey = null;
       _phantomPredicted  = null;
@@ -2780,6 +2780,12 @@
     }
     // شرط الإيقاف العام
     if (_ghostTradeActive || _recalibrating) return;
+    // [v12.3] حارس بيانات البث — لا تتداول على تيكات قديمة
+    if (_streamStalled) { addLog('⛔ [STREAM] CR15 رفض — تدفق متوقف', 'error'); return; }
+    // [v12.3] حارس التقلب — CR15 لا يتداول في أسواق هادئة جداً
+    if (_volatilityState === 'SQUEEZE') { addLog('⛔ [VOL] CR15 رفض — SQUEEZE', 'info'); return; }
+    // [v12.3] وقف الخسائر
+    if (_lossStreakPauseUntil > now) { addLog('⛔ [H1] CR15 محجوب — وقف الخسائر', 'error'); return; }
 
     // ── الاتجاه المعاكس: صاعدة → بيع | هابطة → شراء ────────────────
     const direction = candle.isBullish ? 'SELL' : 'BUY';
@@ -2823,6 +2829,11 @@
     if (asset !== activeAsset) return;
     if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) return;
     if (tradeExec) return;
+    // [v12.3] حارس بيانات البث + تقلب + إيقاف الخسائر + وضع الشبح
+    if (_streamStalled) return;
+    if (_volatilityState === 'SQUEEZE') { addLog('⛔ [VOL] CC3 رفض — SQUEEZE', 'info'); return; }
+    if (_ghostTradeActive || _recalibrating) return;
+    if (_lossStreakPauseUntil > Date.now()) return;
 
     const cc = currentCandles[asset];
     if (!cc || cc.prices.length < 2) return;
