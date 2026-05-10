@@ -215,10 +215,10 @@ class ExtensionManagerActivity : AppCompatActivity() {
         private const val CWS_DL = "https://clients2.google.com/service/update2/crx" +
             "?response=redirect&acceptformat=crx3&prodversion=49.0" +
             "&x=id%%3D%s%%26installsource%%3Dondemand%%26uc"
-        private const val BG_DARK  = 0xFF0F0F1A.toInt()
-        private const val BG_CARD  = 0xFF1A1A2E.toInt()
-        private const val GREEN    = 0xFF00FF88.toInt()
-        private const val WHITE    = 0xFFFFFFFF.toInt()
+        private val BG_DARK  = 0xFF0F0F1A.toInt()
+        private val BG_CARD  = 0xFF1A1A2E.toInt()
+        private val GREEN    = 0xFF00FF88.toInt()
+        private val WHITE    = 0xFFFFFFFF.toInt()
         private const val LP_MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val LP_WC    = ViewGroup.LayoutParams.WRAP_CONTENT
         private val LP_MW = LinearLayout.LayoutParams(LP_MATCH, LP_WC)
