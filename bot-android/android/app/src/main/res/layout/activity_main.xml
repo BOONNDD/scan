@@ -1,191 +1,249 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:background="#0F0F1A">
 
-    <!-- Top URL Bar -->
+    <!-- ── Main browser layout ── -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:orientation="horizontal"
-        android:background="#1A1A2E"
-        android:paddingStart="8dp"
-        android:paddingEnd="8dp"
-        android:gravity="center_vertical">
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:background="#0F0F1A">
 
-        <TextView
-            android:id="@+id/lockIcon"
-            android:layout_width="24dp"
-            android:layout_height="24dp"
-            android:text="🔒"
-            android:textSize="14sp"
-            android:gravity="center" />
+        <!-- Top URL Bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:orientation="horizontal"
+            android:background="#1A1A2E"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:gravity="center_vertical">
 
-        <EditText
-            android:id="@+id/urlBar"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:layout_marginStart="4dp"
-            android:layout_marginEnd="4dp"
-            android:background="#0D1B0D"
+            <TextView
+                android:id="@+id/lockIcon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:text="🔒"
+                android:textSize="14sp"
+                android:gravity="center" />
+
+            <EditText
+                android:id="@+id/urlBar"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:background="#0D1B0D"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:hint="Search or enter URL"
+                android:textColorHint="#555555"
+                android:maxLines="1"
+                android:imeOptions="actionGo"
+                android:inputType="textUri" />
+
+            <TextView
+                android:id="@+id/btnOverflowTop"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:text="⋮"
+                android:textSize="20sp"
+                android:textColor="#00FF88"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless" />
+
+        </LinearLayout>
+
+        <!-- Status Strip -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="32dp"
+            android:orientation="horizontal"
+            android:background="#12121F"
             android:paddingStart="10dp"
-            android:paddingEnd="10dp"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp"
-            android:hint="Search or enter URL"
-            android:hintTextColor="#555555"
-            android:maxLines="1"
-            android:imeOptions="actionGo"
-            android:inputType="textUri" />
+            android:paddingEnd="8dp"
+            android:gravity="center_vertical">
 
-        <TextView
-            android:id="@+id/btnOverflowTop"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:text="⋮"
-            android:textSize="20sp"
-            android:textColor="#00FF88"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless" />
+            <View
+                android:id="@+id/connectionDot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/circle_dot"
+                android:layout_marginEnd="6dp" />
 
-    </LinearLayout>
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Connecting..."
+                android:textColor="#888888"
+                android:textSize="10sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
 
-    <!-- Status Strip -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="32dp"
-        android:orientation="horizontal"
-        android:background="#12121F"
-        android:paddingStart="10dp"
-        android:paddingEnd="8dp"
-        android:gravity="center_vertical">
+            <TextView
+                android:id="@+id/countdownText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="5:00"
+                android:textColor="#555555"
+                android:textSize="10sp"
+                android:layout_marginEnd="8dp" />
 
-        <View
-            android:id="@+id/connectionDot"
-            android:layout_width="8dp"
-            android:layout_height="8dp"
-            android:background="@drawable/circle_dot"
-            android:layout_marginEnd="6dp" />
+            <TextView
+                android:id="@+id/btnRefreshScript"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:text="⟳"
+                android:textSize="18sp"
+                android:textColor="#E94560"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless" />
 
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Connecting..."
-            android:textColor="#888888"
-            android:textSize="10sp"
-            android:maxLines="1"
-            android:ellipsize="end" />
+        </LinearLayout>
 
-        <TextView
-            android:id="@+id/countdownText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="5:00"
-            android:textColor="#555555"
-            android:textSize="10sp"
-            android:layout_marginEnd="8dp" />
+        <!-- Main WebView -->
+        <WebView
+            android:id="@+id/webView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
 
-        <TextView
-            android:id="@+id/btnRefreshScript"
-            android:layout_width="28dp"
-            android:layout_height="28dp"
-            android:text="⟳"
-            android:textSize="18sp"
-            android:textColor="#E94560"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackgroundBorderless" />
+        <!-- Bottom Navigation Bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:orientation="horizontal"
+            android:background="#1A1A2E"
+            android:gravity="center_vertical">
 
-    </LinearLayout>
+            <TextView
+                android:id="@+id/btn_back"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:text="←"
+                android:textSize="20sp"
+                android:textColor="#AAAAAA"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground" />
 
-    <!-- WebView -->
-    <WebView
-        android:id="@+id/webView"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1" />
+            <TextView
+                android:id="@+id/btn_forward"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:text="→"
+                android:textSize="20sp"
+                android:textColor="#AAAAAA"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground" />
 
-    <!-- Bottom Navigation Bar -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="52dp"
-        android:orientation="horizontal"
-        android:background="#1A1A2E"
-        android:gravity="center_vertical">
+            <TextView
+                android:id="@+id/btn_reload"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:text="🔄"
+                android:textSize="18sp"
+                android:textColor="#AAAAAA"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground" />
 
-        <TextView
-            android:id="@+id/btn_back"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:text="←"
-            android:textSize="20sp"
-            android:textColor="#AAAAAA"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackground" />
+            <TextView
+                android:id="@+id/btn_home"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:text="🏠"
+                android:textSize="18sp"
+                android:textColor="#AAAAAA"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground" />
 
-        <TextView
-            android:id="@+id/btn_forward"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:text="→"
-            android:textSize="20sp"
-            android:textColor="#AAAAAA"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackground" />
+            <TextView
+                android:id="@+id/btn_more"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:text="⋮"
+                android:textSize="22sp"
+                android:textColor="#00FF88"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground" />
 
-        <TextView
-            android:id="@+id/btn_reload"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:text="🔄"
-            android:textSize="18sp"
-            android:textColor="#AAAAAA"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackground" />
-
-        <TextView
-            android:id="@+id/btn_home"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:text="🏠"
-            android:textSize="18sp"
-            android:textColor="#AAAAAA"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackground" />
-
-        <TextView
-            android:id="@+id/btn_more"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:text="⋮"
-            android:textSize="22sp"
-            android:textColor="#00FF88"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true"
-            android:background="?attr/selectableItemBackground" />
+        </LinearLayout>
 
     </LinearLayout>
 
-</LinearLayout>
+    <!-- ── Claude AI Panel (full-screen overlay, initially hidden) ── -->
+    <FrameLayout
+        android:id="@+id/claudePanel"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:background="#0F0F1A">
+
+        <!-- Claude header -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:orientation="horizontal"
+            android:background="#1A1A2E"
+            android:paddingStart="14dp"
+            android:paddingEnd="8dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="🤖 Claude AI"
+                android:textColor="#00FF88"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnClaudeClose"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:text="✕"
+                android:textSize="18sp"
+                android:textColor="#AAAAAA"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless" />
+
+        </LinearLayout>
+
+        <!-- claude.ai WebView -->
+        <WebView
+            android:id="@+id/claudeWebView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_marginTop="48dp" />
+
+    </FrameLayout>
+
+</FrameLayout>

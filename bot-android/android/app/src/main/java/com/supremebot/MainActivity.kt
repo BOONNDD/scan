@@ -40,6 +40,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnOverflowTop: TextView
     private lateinit var connectionDot: android.view.View
     private lateinit var countdownText: TextView
+    private lateinit var claudePanel: FrameLayout
+    private lateinit var claudeWebView: WebView
 
     private var botService: BotService? = null
     private var serviceConnected = false
@@ -87,6 +89,13 @@ class MainActivity : AppCompatActivity() {
         btnOverflowTop = findViewById(R.id.btnOverflowTop)
         connectionDot = findViewById(R.id.connectionDot)
         countdownText = findViewById(R.id.countdownText)
+        claudePanel = findViewById(R.id.claudePanel)
+        claudeWebView = findViewById(R.id.claudeWebView)
+
+        findViewById<TextView>(R.id.btnClaudeClose).setOnClickListener {
+            claudePanel.visibility = android.view.View.GONE
+        }
+        setupClaudeWebView()
 
         setupButtons()
 
@@ -144,7 +153,8 @@ class MainActivity : AppCompatActivity() {
         popup.menu.apply {
             add(0, 1, 0, "🔧 DevTools")
             add(0, 2, 0, "🧩 Extensions")
-            add(0, 3, 0, "🏠 Home")
+            add(0, 3, 0, "🤖 Claude AI")
+            add(0, 4, 0, "🏠 Home")
         }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -153,11 +163,36 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(this, ExtensionManagerActivity::class.java))
                     true
                 }
-                3 -> { webView.loadUrl(HOME_URL); true }
+                3 -> { toggleClaudePanel(); true }
+                4 -> { webView.loadUrl(HOME_URL); true }
                 else -> false
             }
         }
         popup.show()
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupClaudeWebView() {
+        claudeWebView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            allowFileAccess = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        claudeWebView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?, request: WebResourceRequest?
+            ) = false
+        }
+        claudeWebView.loadUrl("https://claude.ai")
+    }
+
+    private fun toggleClaudePanel() {
+        claudePanel.visibility = if (claudePanel.visibility == android.view.View.VISIBLE)
+            android.view.View.GONE else android.view.View.VISIBLE
     }
 
     private fun navigateTo(input: String) {
@@ -322,12 +357,17 @@ class MainActivity : AppCompatActivity() {
         dotPollRunnable?.let { handler.removeCallbacks(it) }
         if (serviceConnected) unbindService(serviceConnection)
         webView.destroy()
+        claudeWebView.destroy()
         super.onDestroy()
     }
 
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        if (webView.canGoBack()) webView.goBack()
-        else super.onBackPressed()
+        when {
+            claudePanel.visibility == android.view.View.VISIBLE ->
+                claudePanel.visibility = android.view.View.GONE
+            webView.canGoBack() -> webView.goBack()
+            else -> super.onBackPressed()
+        }
     }
 }
