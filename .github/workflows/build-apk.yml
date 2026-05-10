@@ -40,9 +40,7 @@ jobs:
 
       - name: Build Debug APK
         working-directory: bot-android/android
-        run: |
-          set -o pipefail
-          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+        run: ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
         env:
           GRADLE_OPTS: "-Xmx3g -XX:MaxMetaspaceSize=512m"
 
@@ -50,17 +48,21 @@ jobs:
         if: failure()
         working-directory: bot-android/android
         run: |
-          echo "==================== ACTUAL ERROR ===================="
-          grep -n -E "^(e:|error:|FAILURE:|\* What went wrong|\* Where|>.*FAILED|.*\.kt:[0-9]+:[0-9]+|.*\.xml:[0-9]+)" build.log || echo "(no recognized error pattern found)"
+          if [ ! -f build.log ]; then
+            echo "build.log not found — Gradle build never started"
+            exit 0
+          fi
+          echo "==================== FIRST 80 LINES ===================="
+          head -n 80 build.log
           echo ""
-          echo "==================== FAILURE BLOCK ===================="
-          awk '/^FAILURE:/,/^BUILD FAILED/' build.log
+          echo "==================== KOTLIN / AAPT ERRORS ===================="
+          grep -n -E "^e:|^error:|error: resource|ERROR:" build.log || echo "(no error lines found)"
           echo ""
-          echo "==================== KOTLIN ERRORS ===================="
-          grep -B1 -A3 "^e:" build.log || echo "(no kotlin errors)"
+          echo "==================== TASK FAILURES ===================="
+          grep -n "FAILED\|What went wrong\|Caused by:" build.log | head -40 || echo "(no task failures)"
           echo ""
-          echo "==================== LAST 200 LINES ===================="
-          tail -n 200 build.log
+          echo "==================== LAST 150 LINES ===================="
+          tail -n 150 build.log
 
       - name: Upload build log
         if: always()
