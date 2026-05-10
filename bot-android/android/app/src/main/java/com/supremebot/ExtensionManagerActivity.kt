@@ -43,7 +43,7 @@ class ExtensionManagerActivity : AppCompatActivity() {
             setOnClickListener { showAddDialog() }
             toolbar.addView(this)
         }
-        root.addView(toolbar, LP_MW)
+        root.addView(toolbar, lp_mw())
 
         emptyText = TextView(this).apply {
             text = "No extensions installed.\nTap + Add to load a ZIP / CRX or Chrome Web Store extension."
@@ -51,7 +51,7 @@ class ExtensionManagerActivity : AppCompatActivity() {
             setPadding(dp(24), dp(40), dp(24), dp(40))
             visibility = View.GONE
         }
-        root.addView(emptyText, LP_MW)
+        root.addView(emptyText, lp_mw())
 
         listView = ListView(this).apply {
             setBackgroundColor(BG_DARK); divider = null
@@ -219,8 +219,8 @@ class ExtensionManagerActivity : AppCompatActivity() {
         private val BG_CARD  = 0xFF1A1A2E.toInt()
         private val GREEN    = 0xFF00FF88.toInt()
         private val WHITE    = 0xFFFFFFFF.toInt()
-        private const val LP_MATCH = ViewGroup.LayoutParams.MATCH_PARENT
-        private const val LP_WC    = ViewGroup.LayoutParams.WRAP_CONTENT
-        private val LP_MW = LinearLayout.LayoutParams(LP_MATCH, LP_WC)
+        private val LP_MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+        private val LP_WC    = ViewGroup.LayoutParams.WRAP_CONTENT
+        private fun lp_mw() = LinearLayout.LayoutParams(LP_MATCH, LP_WC)
     }
 }
