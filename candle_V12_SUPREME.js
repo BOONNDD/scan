@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.8)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.9)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.8.0
-// @description  V12.8: AI Signal Direct Trader | uid:3 signals → instant trade | bypass SUPREME filters
+// @version      12.9.0
+// @description  V12.9: tradeExec frozen fix (mobile timer throttle) | AI-Direct WS+button fallback
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -2101,6 +2101,16 @@
         _streamStalled = false;
         _lastTickMs = Date.now(); // prevent immediate re-stall before first tick
         addLog('🔄 [WS-OPEN] استعاد الاتصال — إزالة STREAM STALL', 'signal');
+      }
+      // v12.9 [TRADEEXEC-FIX] mobile browsers (Kiwi) throttle/pause setTimeout when
+      // the app is backgrounded or screen is off — the auto-reset timer never fires.
+      // On every WS reconnect: if tradeExec has been locked > 15s, release it now.
+      if (_isTradeSocket(urlStr) && tradeExec && (Date.now() - lastTradeMs) > 15000) {
+        if (_tradeExecLockTimer)  { clearTimeout(_tradeExecLockTimer);  _tradeExecLockTimer  = null; }
+        if (_tradeExecResetTimer) { clearTimeout(_tradeExecResetTimer); _tradeExecResetTimer = null; }
+        tradeExec = false; updateTradeBtn();
+        addLog('🔄 [WS-OPEN] تحرير tradeExec المجمّد — كان مقفلاً منذ ' +
+               Math.round((Date.now() - lastTradeMs) / 1000) + 'ث', 'signal');
       }
     });
     ws.addEventListener('close', () => {
@@ -6929,21 +6939,16 @@
       return;
     }
 
-    // Need live WS to trade
-    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) {
-      addLog('❌ [AI-D] مقبس التداول غير متصل', 'error');
-      return;
-    }
-
     // Build packet with signal's own asset + timeframe
     const amount     = CFG.AI_DIRECT_AMOUNT > 0 ? _safeAmount(CFG.AI_DIRECT_AMOUNT) : tradeAmount;
     const snapTime   = snapToPOTime(tfSecs);
-    const tradeAsset = symbol || activeAsset || '';
-    const action     = dir === 'BUY' ? 'call' : 'put';
-    const reqId      = _nextReqId();
-    const packet     = '42["openOrder",{"asset":"' + tradeAsset + '","amount":' + amount +
-      ',"action":"' + action + '","isDemo":' + isDemo + ',"requestId":' + reqId +
-      ',"optionType":100,"time":' + snapTime + '}]';
+    // AI signals for different assets: if MATCH_ONLY=false, trade on signal asset;
+    // if WS is down and signal asset ≠ activeAsset, fall back to button on activeAsset
+    const wsOk       = tradeWSOrig && tradeWS && tradeWS.readyState === 1;
+    const tradeAsset = wsOk ? (symbol || activeAsset || '') : (activeAsset || '');
+    if (!tradeAsset) { addLog('❌ [AI-D] لا أصل نشط', 'error'); return; }
+
+    const action = dir === 'BUY' ? 'call' : 'put';
 
     // Commit trade state
     _aiDirectLastTradeMs = now;
@@ -6951,18 +6956,34 @@
     tradeExec = true; lastTradeMs = now;
     updateTradeBtn();
 
-    try {
-      tradeWSOrig(packet);
+    const tfMin    = (snapTime / 60).toFixed(0);
+    const priceLbl = sigPrice ? ' سعر:' + sigPrice : '';
+    let   success  = false;
+
+    if (wsOk) {
+      try {
+        const reqId  = _nextReqId();
+        const packet = '42["openOrder",{"asset":"' + tradeAsset + '","amount":' + amount +
+          ',"action":"' + action + '","isDemo":' + isDemo + ',"requestId":' + reqId +
+          ',"optionType":100,"time":' + snapTime + '}]';
+        tradeWSOrig(packet);
+        success = true;
+      } catch (e) { addLog('❌ [AI-D] خطأ WS: ' + e.message, 'error'); }
+    }
+
+    // Fallback to button click when WS is down (trades on active asset only)
+    if (!success) success = clickTradeButton(dir);
+
+    if (success) {
       _aiDirectStats.trades++;
-      const tfMin  = (snapTime / 60).toFixed(0);
-      const priceLbl = sigPrice ? ' سعر:' + sigPrice : '';
       addLog(
         '🤖 [AI-DIRECT] ' + (dir === 'BUY' ? '↑ شراء' : '↓ بيع') +
-        ' | ' + tradeAsset + ' | ' + tfMin + 'د | $' + amount + priceLbl,
+        ' | ' + tradeAsset + ' | ' + tfMin + 'د | $' + amount + priceLbl +
+        (wsOk ? '' : ' 🖱fallback'),
         'signal'
       );
-    } catch (e) {
-      addLog('❌ [AI-D] خطأ إرسال: ' + e.message, 'error');
+    } else {
+      addLog('❌ [AI-D] فشل التنفيذ — WS + زر', 'error');
     }
 
     // Release tradeExec with adaptive lock (same as regular trades)
@@ -7079,7 +7100,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.8_SUPREME | AI-Direct✓ | uid3→trade | Corr✓ | console: _dumpAISignals()', 'signal');
+      addLog('⚡ V12.9_SUPREME | AI-Direct✓ | tradeExecFix✓ | WS+Btn fallback', 'signal');
     };
 
     if (W.document.body) {
