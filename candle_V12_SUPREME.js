@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.4)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.5)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.4.0
-// @description  V12.4: AppData reader | Mobile buttons | AI-Signal monitor | Islamic account | All v12.3 preserved
+// @version      12.5.0
+// @description  V12.5: Islamic CSS detect | Bugsnag stealth | WS#1 event log | Platform version watch | All v12.4 preserved
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -13,6 +13,36 @@
 // ==/UserScript==
 
 /*
+ * ════════════════════════════════════════════════════════════════════════
+ *  v12.5 — RESOURCE ANALYSIS UPDATE (built on v12.4.0)
+ *
+ *  🔍 مبني على تحليل Resources Tab في Eruda DevTools (لقطات الشاشة)
+ *  ✅ كل تحسينات v12.4 محفوظة
+ *
+ *  [BUG-1] Islamic CSS detection — islamic-account.min.css أكثر موثوقية من AppData:
+ *  ├─ AppData global قد لا يتوفر قبل hydration الصفحة
+ *  └─ CSS stylesheet دائماً موجود → fallback detection
+ *
+ *  [BUG-2] Bugsnag stealth — bugsnag-7.min.js?ver=8.0.106 مُحمَّل:
+ *  ├─ أي خطأ من سكريبتنا يُرسل لـ PocketOption عبر Bugsnag
+ *  └─ نرقّع window.Bugsnag.notify لتصفية أخطاء السكريبت
+ *
+ *  [BUG-3] WS#1 (chat-po.site) events مُهملة تماماً:
+ *  ├─ أحداث غير معروفة من chat-po.site تُحذف بصمت
+ *  └─ نضيف logger للأحداث الجديدة → اكتشاف signals مخفية
+ *
+ *  [STR-1] Platform Version Watcher:
+ *  ├─ platform/main.js?v=1778311135 — نقرأ الإصدار من DOM
+ *  ├─ نخزن في localStorage
+ *  └─ عند تغيير الإصدار: تحذير + إيقاف تلقائي مؤقت
+ *
+ *  [STR-2] Chat Event Harvester (WS#1):
+ *  ├─ نسجّل كل أحداث chat-po.site غير المعروفة
+ *  └─ إذا وُجد event "signal"/"recommend"/"hot_asset" → نستخدمه كـ boost
+ *
+ *  [STR-3] CSS-based button selectors:
+ *  └─ mobile.min.css + mobile.theme-e.min.css → محددات دقيقة
+ *
  * ════════════════════════════════════════════════════════════════════════
  *  v12.4 — PLATFORM INTELLIGENCE UPDATE (built on v12.3.1)
  *
@@ -491,6 +521,13 @@
   let _lastAISignal        = null;   // 'BUY' | 'SELL' | null
   let _lastAISignalTs      = 0;      // timestamp of last signal
   let _aiSignalObserver    = null;   // MutationObserver handle
+  // ── v12.5 [PLATFORM] version watcher ─────────────────────────────────────
+  let _platformVersion     = 0;      // platform/main.js?v= value read from DOM
+  // ── v12.5 [WS#1] chat-po.site signal harvesting ──────────────────────────
+  const _chatSignalSeen    = new Set(); // dedup already-logged unknown chat events
+  let _chatBuyVotes        = 0;      // community BUY count from chat signals
+  let _chatSellVotes       = 0;      // community SELL count from chat signals
+  let _chatSignalTs        = 0;      // timestamp of last chat signal
 
   // ══════════════════════════════════════════════════════════════════════
   // § 2.5  ✅ v10.9 — Adaptive Cooldown + SubSecond Trade Manager
@@ -1979,6 +2016,7 @@
   }
 
   function _attachWSHooks(ws, urlStr) {
+    ws._url = urlStr; // v12.5: tag each WS with its URL for chat/event harvester
     const _origSend = ws.send.bind(ws);
     // ─── [FIX v10.6] keepalive: رد pong('3') على ping('2') من السيرفر
     // EIO4 = السيرفر يرسل '2'، الكلاينت يرد '3' — لا setInterval من طرفنا
@@ -2067,6 +2105,36 @@
     const msLeft = fastCloseAt - Date.now();
     if (msLeft > 0) { _rebuildPayloadCache(); schedulePredictiveEntry(); }
   }
+
+  // v12.5 [BUG-2] Bugsnag stealth — filter our script errors from PO's error monitoring
+  // bugsnag-7.min.js?ver=8.0.106 is loaded by PO; any unhandled errors in page context
+  // are captured and sent to PO's Bugsnag account. We patch notify() to drop our errors.
+  (function _patchBugsnag() {
+    const _tryPatch = () => {
+      const B = W.Bugsnag || W.bugsnag;
+      if (!B || !B.notify) return false;
+      const orig = B.notify.bind(B);
+      B.notify = function(err, ...args) {
+        try {
+          const stack = (err?.stack || err?.message || String(err)).toLowerCase();
+          // Drop any error touching our script (candle_V12, SUPREME, etc.)
+          if (stack.includes('candle_v12') || stack.includes('supreme') ||
+              stack.includes('cbroot') || stack.includes('cbpanel') ||
+              stack.includes('executetrade') || stack.includes('_ppt') ||
+              stack.includes('classifyvolatility') || stack.includes('_runmini')) return;
+        } catch(_) {}
+        return orig(err, ...args);
+      };
+      return true;
+    };
+    // Try immediately; retry after DOMContentLoaded if Bugsnag not yet loaded
+    if (!_tryPatch()) {
+      const retry = () => _tryPatch();
+      W.document.addEventListener('DOMContentLoaded', retry);
+      setTimeout(retry, 2000);
+      setTimeout(retry, 5000);
+    }
+  })();
 
   W.WebSocket = new Proxy(NativeWS, {
     construct(Target, args) { const ws = new Target(...args); _attachWSHooks(ws, String(args[0]||'')); return ws; },
@@ -2180,6 +2248,43 @@
     if (evName==='chafor') { const cf = extractChafor(Array.isArray(data)?data:[data]); if (cf) onChafor(cf.asset, cf.seconds); }
     if (evName==='changeSymbol' && data?.asset) onActiveAsset(data.asset, 'changeSymbol');
     if (evName==='saveCharts') { const s = (data&&data.settings)||data||{}; _extractFastCloseAt(s, data||{}); }
+
+    // v12.5 [BUG-3 / STR-2] WS#1 chat-po.site event harvester
+    // Unknown events from chat-po.site are logged once for discovery.
+    // Known signal/recommendation events update _chatBuyVotes/_chatSellVotes.
+    const KNOWN_EVENTS = new Set([
+      'updateStream','tick','quote','stream','chafor','changeSymbol','saveCharts',
+      'successauth','updateAssets','updateCharts','successopenOrder','successcloseOrder',
+      'successupdateBalance','failopenOrder','updateHistoryNewFast','platform',
+    ]);
+    if (!KNOWN_EVENTS.has(evName) && wsRef) {
+      // Classify the source socket
+      const isChatWS  = !!(wsRef._url && wsRef._url.includes('chat-po'));
+      const isEventWS = !!(wsRef._url && wsRef._url.includes('events-po'));
+      const prefix = isChatWS ? '[WS#1-CHAT]' : isEventWS ? '[WS#2-EVT]' : '[WS-UNK]';
+
+      // Log each unknown event ONCE for discovery
+      if (!_chatSignalSeen.has(evName)) {
+        _chatSignalSeen.add(evName);
+        const preview = JSON.stringify(data).slice(0, 120);
+        addLog('🔍 ' + prefix + ' غير معروف: "' + evName + '" → ' + preview, 'info');
+      }
+
+      // Known signal patterns — treat as community signal
+      const evL = evName.toLowerCase();
+      if (evL.includes('signal') || evL.includes('recommend') || evL.includes('predict') || evL.includes('hot_asset')) {
+        const d = data || {};
+        const dir = (d.direction||d.action||d.signal||d.type||'').toString().toLowerCase();
+        const isUp   = dir.includes('call')||dir.includes('buy')||dir.includes('up')||dir.includes('higher');
+        const isDown = dir.includes('put')||dir.includes('sell')||dir.includes('down')||dir.includes('lower');
+        if (isUp || isDown) {
+          _chatBuyVotes  = isUp   ? (_chatBuyVotes  + 1) : 0;
+          _chatSellVotes = isDown ? (_chatSellVotes + 1) : 0;
+          _chatSignalTs  = Date.now();
+          addLog('📡 ' + prefix + ' إشارة: ' + (isUp ? 'BUY' : 'SELL') + ' (تأييد:' + (isUp ? _chatBuyVotes : _chatSellVotes) + ')', 'signal');
+        }
+      }
+    }
   }
 
   function _startAdaptiveSigmaDecayTimerLocal() {
@@ -4035,7 +4140,7 @@
   <div id="cbPanel">
     <div class="cb-hdr" id="cbDragHdr">
       <div class="cb-hdr-dot" id="cbHdrDot"></div>
-      <span class="cb-ttl" id="cbMainTitle">⚡ V12.4 SUPREME</span>
+      <span class="cb-ttl" id="cbMainTitle">⚡ V12.5 SUPREME</span>
       <div class="cb-hdr-actions">
         <button class="cb-icon-btn" id="cbMinimize">−</button>
         <button class="cb-icon-btn" id="cbClose">✕</button>
@@ -4476,7 +4581,7 @@
       if (_isIslamicAccount) badges.push('🕌');
       if (_aiTradingMode)    badges.push('🤖');
       if (_platformId === 9) badges.push('📱');
-      titleEl.textContent = '⚡ V12.4 SUPREME' + (badges.length ? ' ' + badges.join('') : '');
+      titleEl.textContent = '⚡ V12.5 SUPREME' + (badges.length ? ' ' + badges.join('') : '');
     }
 
     // ✅ v10.4 FIX#5: بعد 3 ثوانٍ اجعل المقبس جاهزاً حتى لو لم يأتِ successauth
@@ -5554,13 +5659,21 @@
       const aiAge = Date.now() - _lastAISignalTs;
       if (aiAge < CFG.AI_SIGNAL_TTL_MS) {
         if (_lastAISignal === direction) {
-          // AI agrees → boost confidence (but cap at 100)
           spConf = Math.min(100, Math.round(spConf + CFG.AI_SIGNAL_BOOST_MATCH * 10));
         } else {
-          // AI opposes → soft penalty (warning, not block)
           spConf = Math.max(0, Math.round(spConf - CFG.AI_SIGNAL_PENALTY_OPPOSE * 10));
         }
       }
+    }
+
+    // v12.5 [STR-2] Chat community signal modifier (from WS#1 harvester)
+    if (direction !== 'NEUTRAL' && _chatSignalTs > 0 && (Date.now() - _chatSignalTs) < 60000) {
+      const votes   = direction === 'BUY' ? _chatBuyVotes : _chatSellVotes;
+      const oppVotes= direction === 'BUY' ? _chatSellVotes : _chatBuyVotes;
+      // Contrarian: crowd BUY → fade → slight penalty; crowd opposing → slight boost
+      // (binary options: crowd is typically wrong at extremes)
+      if (votes >= 3)    spConf = Math.max(0,   Math.round(spConf - 3));   // crowd piling in → fade
+      if (oppVotes >= 3) spConf = Math.min(100, Math.round(spConf + 3));   // crowd fading → boost
     }
 
     ps.buyPct     = buyPct;
@@ -6256,6 +6369,37 @@
   // § 29.7  v12.4 — AppData Reader + AI Signal Monitor
   // ══════════════════════════════════════════════════════════════════════
 
+  // v12.5 [BUG-1] Islamic CSS detection — loaded stylesheet is more reliable than AppData global
+  function _detectIslamicViaCSS() {
+    try {
+      const links = W.document.querySelectorAll('link[rel="stylesheet"]');
+      for (const l of links) { if ((l.href || '').includes('islamic-account')) return true; }
+    } catch(_) {}
+    return false;
+  }
+
+  // v12.5 [STR-1] Read platform version from <script src="platform/main.js?v=XXXXXX">
+  function _readPlatformVersion() {
+    try {
+      const scripts = W.document.querySelectorAll('script[src*="platform/main.js"]');
+      for (const s of scripts) {
+        const m = (s.src || '').match(/[?&]v=(\d+)/);
+        if (m) { _platformVersion = parseInt(m[1], 10); break; }
+      }
+      if (_platformVersion > 0) {
+        const stored = parseInt(W.localStorage.getItem('_po_plat_v') || '0', 10);
+        if (stored && stored !== _platformVersion) {
+          addLog('⚠️ [PLATFORM] تحديث المنصة! v' + stored + ' → v' + _platformVersion + ' — تحقق من البوت', 'error');
+          // Pause auto-trading for 30s to let the user verify the script still works
+          autoTrade = false;
+          setTimeout(() => { autoTrade = true; addLog('✅ [PLATFORM] استُؤنف التداول بعد تحديث المنصة', 'signal'); }, 30000);
+        }
+        W.localStorage.setItem('_po_plat_v', String(_platformVersion));
+        addLog('🔖 [PLATFORM] v' + _platformVersion + (_platformId === 9 ? ' 📱' : ''), 'info');
+      }
+    } catch(_) {}
+  }
+
   function _readAppData() {
     if (!CFG.APPDATA_READ_ENABLED) return;
     try {
@@ -6278,26 +6422,33 @@
           if (m) { try { data = JSON.parse(m[1]); break; } catch(_) {} }
         }
       }
-      if (!data) return;
 
-      _appData = data;
-      _isIslamicAccount = !!(data.isIslamicAccount || data.is_islamic_account);
-      _aiTradingMode    = !!(data.ai_trading_mode || data.aiTradingMode);
-      _platformId       = parseInt(data.platform || 0, 10);
+      if (data) {
+        _appData = data;
+        _isIslamicAccount = !!(data.isIslamicAccount || data.is_islamic_account);
+        _aiTradingMode    = !!(data.ai_trading_mode || data.aiTradingMode);
+        _platformId       = parseInt(data.platform || 0, 10);
+      }
+
+      // v12.5 [BUG-1] CSS fallback — more reliable than AppData global
+      if (!_isIslamicAccount) _isIslamicAccount = _detectIslamicViaCSS();
 
       const flags = [];
       if (_isIslamicAccount) flags.push('🕌 إسلامي');
       if (_aiTradingMode)    flags.push('🤖 AI-Mode');
       if (_platformId === 9) flags.push('📱 موبايل');
-      if (data.userSecret)   flags.push('🔑 secret✓');
+      if (data?.userSecret)  flags.push('🔑 secret✓');
 
       addLog('📋 [APPDATA] ' + (flags.length ? flags.join(' | ') : 'قُرئت'), 'info');
       if (_isIslamicAccount && CFG.ISLAMIC_DISABLE_IMDB) {
         addLog('🕌 [ISLAMIC] IMDB معطَّل — حساب إسلامي', 'info');
       }
       if (_aiTradingMode && CFG.AI_SIGNAL_ENABLED) {
-        setTimeout(_startAISignalMonitor, 3000); // wait for DOM to fully render
+        setTimeout(_startAISignalMonitor, 3000);
       }
+
+      // v12.5 [STR-1] read platform version after data is available
+      _readPlatformVersion();
     } catch(_) {}
   }
 
@@ -6357,7 +6508,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.4_SUPREME | AppData ✓ | AI-Monitor ✓ | MobileBtn ✓ | Islamic ✓', 'signal');
+      addLog('⚡ V12.5_SUPREME | Bugsnag✓ | IslamicCSS✓ | PlatVer✓ | WS1-Harvest✓', 'signal');
     };
 
     if (W.document.body) {
