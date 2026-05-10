@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.3)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.4)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.3.0
-// @description  V12.3: VOL-GATE | PPT 3-level+Decay | AdaptiveConf | Mini-Backtest | Breakeven HUD | Bad-Session alert | All v12.2 preserved
+// @version      12.4.0
+// @description  V12.4: AppData reader | Mobile buttons | AI-Signal monitor | Islamic account | All v12.3 preserved
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -13,6 +13,32 @@
 // ==/UserScript==
 
 /*
+ * ════════════════════════════════════════════════════════════════════════
+ *  v12.4 — PLATFORM INTELLIGENCE UPDATE (built on v12.3.1)
+ *
+ *  📱 مبني على تحليل صفحة PocketOption المحمولة (m.pocketoption.com)
+ *  ✅ كل تحسينات v12.3 محفوظة (VOL-GATE، PPT-Decay، AdaptiveConf)
+ *
+ *  [A] AppData Reader — قراءة بيانات المنصة عند الإقلاع:
+ *  ├─ userSecret: توثيق WS — للمراقبة والتشخيص
+ *  ├─ isIslamicAccount: حساب إسلامي → HUD badge + توقيف IMDB
+ *  ├─ ai_trading_mode: وضع AI المنصة → تفعيل مراقب الإشارات
+ *  └─ platform/serverList: معرفة نوع الواجهة (موبايل/ديسكتوب)
+ *
+ *  [B] Mobile Button Selectors — أزرار خاصة بالموبايل:
+ *  ├─ platform=9 (m.pocketoption.com): أزرار Higher/Lower
+ *  ├─ محددات CSS إضافية: [data-side], .call-btn, .quick-hl-*
+ *  └─ بحث نصي عربي محسّن: "أعلى"/"أدنى"
+ *
+ *  [C] AI Signal Monitor — مراقب إشارات AI المنصة:
+ *  ├─ إذا ai_trading_mode=1 → مراقبة DOM لإشارات المنصة المدمجة
+ *  ├─ الإشارة تُدخل كـ PPT boost (+0.5 conf) عند التطابق مع البوت
+ *  └─ تُعاكس → تُطرح (-0.3 conf): تحذير لا حجب
+ *
+ *  [D] Islamic Account Guard:
+ *  ├─ إذا isIslamicAccount=1 → تعطيل IMDB (صفقات متعددة)
+ *  └─ HUD: badge "🕌" في الرأس — تذكير بالوضع
+ *
  * ════════════════════════════════════════════════════════════════════════
  *  v12.3 — FULL REBUILD ENGINE (7 modules, built on v12.2)
  *
@@ -385,6 +411,18 @@
     // ─── 🆕 v12.3 [MINI BACKTEST] startup forward-test ───────────────
     MINI_BACKTEST_ENABLED     : true,
     MINI_BACKTEST_MIN_CANDLES : 15,
+
+    // ─── 🆕 v12.4 [APPDATA] Platform intelligence ────────────────────
+    APPDATA_READ_ENABLED      : true,  // قراءة AppData من الصفحة عند الإقلاع
+
+    // ─── 🆕 v12.4 [AI-SIGNAL] Platform AI monitor ────────────────────
+    AI_SIGNAL_ENABLED         : true,  // مراقبة إشارات AI المنصة (يتطلب ai_trading_mode=1)
+    AI_SIGNAL_BOOST_MATCH     : 0.5,   // إضافة للثقة عند تطابق إشارة AI مع البوت
+    AI_SIGNAL_PENALTY_OPPOSE  : 0.3,   // طرح من الثقة عند تعارض الإشارة
+    AI_SIGNAL_TTL_MS          : 30000, // مدة صلاحية الإشارة (30 ثانية)
+
+    // ─── 🆕 v12.4 [ISLAMIC] Islamic account guard ────────────────────
+    ISLAMIC_DISABLE_IMDB      : true,  // تعطيل IMDB في الحسابات الإسلامية
   };
 
   // ══════════════════════════════════════════════════════════════════════
@@ -444,6 +482,15 @@
   // ── v12.3 [SESSION] tracking for bad-session detection ──────────────────
   let _sessionStartBalance = null;
   let _miniBacktestDone    = false;
+  // ── v12.4 [APPDATA] platform intelligence read from page ─────────────────
+  let _appData             = null;   // raw AppData object from PO page
+  let _isIslamicAccount    = false;  // isIslamicAccount flag from AppData
+  let _aiTradingMode       = false;  // ai_trading_mode flag from AppData
+  let _platformId          = 0;      // platform id (9=mobile, 1=desktop)
+  // ── v12.4 [AI-SIGNAL] latest platform AI signal ──────────────────────────
+  let _lastAISignal        = null;   // 'BUY' | 'SELL' | null
+  let _lastAISignalTs      = 0;      // timestamp of last signal
+  let _aiSignalObserver    = null;   // MutationObserver handle
 
   // ══════════════════════════════════════════════════════════════════════
   // § 2.5  ✅ v10.9 — Adaptive Cooldown + SubSecond Trade Manager
@@ -1281,6 +1328,8 @@
     if (!accountBalance || accountBalance < 10)         return false;
     if (STATS.lossStreak >= 2)                          return false;  // بعد 2 خسائر → توقف عن التضعيف
     if ((Date.now() - _lastIMDBTradeMs) < CFG.IMDB_COOLDOWN_MS) return false;
+    // v12.4 [ISLAMIC] Islamic accounts: disable multi-trade (IMDB)
+    if (_isIslamicAccount && CFG.ISLAMIC_DISABLE_IMDB) return false;
     return true;
   }
 
@@ -3734,19 +3783,47 @@
 
   function clickTradeButton(direction) {
     const isCall = direction === 'BUY';
+
+    // v12.4 [MOBILE] CSS selector fast-path — try known mobile selectors first
+    // PocketOption mobile (platform=9): /en/cabinet/demo-quick-high-low uses
+    // "Higher" / "Lower" buttons with specific class patterns
+    const callSels = [
+      // Mobile-specific (platform=9, quick-high-low page)
+      '[class*="call-button"]:not([disabled])', '[class*="CallButton"]:not([disabled])',
+      '[class*="quick-hl-call"]:not([disabled])', '[class*="QuickHlCall"]:not([disabled])',
+      '[data-side="call"]:not([disabled])', '[data-type="call"]:not([disabled])',
+      '[data-direction="call"]:not([disabled])',
+      // Standard selectors
+      '.btn-call', '[class*="btnCall"]', '#call-btn', '#buy-btn',
+      '[class*="buy-btn"]', '[class*="buyBtn"]', '[class*="tradeCall"]',
+    ];
+    const putSels = [
+      '[class*="put-button"]:not([disabled])',  '[class*="PutButton"]:not([disabled])',
+      '[class*="quick-hl-put"]:not([disabled])', '[class*="QuickHlPut"]:not([disabled])',
+      '[data-side="put"]:not([disabled])', '[data-type="put"]:not([disabled])',
+      '[data-direction="put"]:not([disabled])',
+      '.btn-put', '[class*="btnPut"]', '#put-btn', '#sell-btn',
+      '[class*="sell-btn"]', '[class*="sellBtn"]', '[class*="tradePut"]',
+    ];
+    for (const sel of (isCall ? callSels : putSels)) {
+      try {
+        const btn = W.document.querySelector(sel);
+        if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') { btn.click(); return true; }
+      } catch(_) {}
+    }
+
+    // React fiber walk + text-match fallback (all buttons)
     const buttons = W.document.querySelectorAll('button,[role="button"]');
     for (const btn of buttons) {
       if (btn.disabled || btn.getAttribute('aria-disabled')==='true') continue;
       const fiber = _getReactFiber(btn);
       if (fiber) { const fd = _extractFiberDirection(fiber); if(fd==='call'&&isCall){btn.click();return true;} if(fd==='put'&&!isCall){btn.click();return true;} }
-      // ✅ v10.4 FIX#4: استخدم includes بدل ^ $ — يمسك "↑ شراء" و"↓ بيع"
+      // v10.4 FIX#4: text match — handles "↑ شراء", "Higher", "أعلى", "Buy", "Call"
       const txt = (btn.textContent||btn.innerText||'').trim();
-      if (isCall  && (txt.includes('شراء')||txt.toLowerCase().includes('buy')||txt.toLowerCase().includes('call')||txt.includes('↑')||txt.toLowerCase().includes('higher')))  { btn.click(); return true; }
-      if (!isCall && (txt.includes('بيع')||txt.toLowerCase().includes('sell')||txt.toLowerCase().includes('put')||txt.includes('↓')||txt.toLowerCase().includes('lower')))   { btn.click(); return true; }
+      const tl  = txt.toLowerCase();
+      if (isCall  && (txt.includes('شراء')||txt.includes('أعلى')||tl.includes('buy')||tl.includes('call')||txt.includes('↑')||tl.includes('higher'))) { btn.click(); return true; }
+      if (!isCall && (txt.includes('بيع') ||txt.includes('أدنى') ||tl.includes('sell')||tl.includes('put') ||txt.includes('↓')||tl.includes('lower')))  { btn.click(); return true; }
     }
-    const callSels=['.btn-call','[class*="btnCall"]','[data-direction="call"]','#call-btn','#buy-btn','[class*="buy"]','[class*="call"]'];
-    const putSels =['.btn-put', '[class*="btnPut"]', '[data-direction="put"]', '#put-btn','#sell-btn','[class*="sell"]','[class*="put"]'];
-    for (const sel of (isCall?callSels:putSels)) { const btn=W.document.querySelector(sel); if(btn&&!btn.disabled&&btn.getAttribute('aria-disabled')!=='true'){btn.click();return true;} }
     return false;
   }
 
@@ -3958,7 +4035,7 @@
   <div id="cbPanel">
     <div class="cb-hdr" id="cbDragHdr">
       <div class="cb-hdr-dot" id="cbHdrDot"></div>
-      <span class="cb-ttl">⚡ v10.7 — TREND GUARD | فلتر الاتجاه</span>
+      <span class="cb-ttl" id="cbMainTitle">⚡ V12.4 SUPREME</span>
       <div class="cb-hdr-actions">
         <button class="cb-icon-btn" id="cbMinimize">−</button>
         <button class="cb-icon-btn" id="cbClose">✕</button>
@@ -4391,6 +4468,16 @@
     // ✅ v10.4 FIX#1: مزامنة الـ toggle مع autoTrade=true
     if (toggle) { toggle.checked = autoTrade; }
     if (badge)  { badge.textContent = autoTrade ? 'ON' : 'OFF'; }
+
+    // v12.4: update title to reflect account type (AppData read before initUI)
+    const titleEl = W.document.getElementById('cbMainTitle');
+    if (titleEl) {
+      const badges = [];
+      if (_isIslamicAccount) badges.push('🕌');
+      if (_aiTradingMode)    badges.push('🤖');
+      if (_platformId === 9) badges.push('📱');
+      titleEl.textContent = '⚡ V12.4 SUPREME' + (badges.length ? ' ' + badges.join('') : '');
+    }
 
     // ✅ v10.4 FIX#5: بعد 3 ثوانٍ اجعل المقبس جاهزاً حتى لو لم يأتِ successauth
     setTimeout(() => {
@@ -5462,6 +5549,20 @@
 
     const direction = buyPct > 55 ? 'BUY' : sellPct > 55 ? 'SELL' : 'NEUTRAL';
 
+    // v12.4 [AI-SIGNAL] Platform AI signal modifier
+    if (CFG.AI_SIGNAL_ENABLED && _lastAISignal && direction !== 'NEUTRAL') {
+      const aiAge = Date.now() - _lastAISignalTs;
+      if (aiAge < CFG.AI_SIGNAL_TTL_MS) {
+        if (_lastAISignal === direction) {
+          // AI agrees → boost confidence (but cap at 100)
+          spConf = Math.min(100, Math.round(spConf + CFG.AI_SIGNAL_BOOST_MATCH * 10));
+        } else {
+          // AI opposes → soft penalty (warning, not block)
+          spConf = Math.max(0, Math.round(spConf - CFG.AI_SIGNAL_PENALTY_OPPOSE * 10));
+        }
+      }
+    }
+
     ps.buyPct     = buyPct;
     ps.sellPct    = sellPct;
     ps.direction  = direction;
@@ -6152,6 +6253,88 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // § 29.7  v12.4 — AppData Reader + AI Signal Monitor
+  // ══════════════════════════════════════════════════════════════════════
+
+  function _readAppData() {
+    if (!CFG.APPDATA_READ_ENABLED) return;
+    try {
+      // PocketOption injects AppData into the page under several possible globals
+      const candidates = [
+        W.AppData, W.__app__, W.__APP__, W.pageData, W.__pageData__,
+        W.app?.config?.globalProperties?.__appData,
+      ];
+      let data = null;
+      for (const c of candidates) {
+        if (c && typeof c === 'object' && ('userSecret' in c || 'isIslamicAccount' in c || 'platform' in c)) {
+          data = c; break;
+        }
+      }
+      // Fallback: scan inline <script> tags for the AppData assignment pattern
+      if (!data) {
+        const scripts = W.document.querySelectorAll('script:not([src])');
+        for (const s of scripts) {
+          const m = s.textContent.match(/(?:window\.)?(?:AppData|__app__|__APP__)[\s]*=[\s]*(\{[\s\S]+?\})\s*;/);
+          if (m) { try { data = JSON.parse(m[1]); break; } catch(_) {} }
+        }
+      }
+      if (!data) return;
+
+      _appData = data;
+      _isIslamicAccount = !!(data.isIslamicAccount || data.is_islamic_account);
+      _aiTradingMode    = !!(data.ai_trading_mode || data.aiTradingMode);
+      _platformId       = parseInt(data.platform || 0, 10);
+
+      const flags = [];
+      if (_isIslamicAccount) flags.push('🕌 إسلامي');
+      if (_aiTradingMode)    flags.push('🤖 AI-Mode');
+      if (_platformId === 9) flags.push('📱 موبايل');
+      if (data.userSecret)   flags.push('🔑 secret✓');
+
+      addLog('📋 [APPDATA] ' + (flags.length ? flags.join(' | ') : 'قُرئت'), 'info');
+      if (_isIslamicAccount && CFG.ISLAMIC_DISABLE_IMDB) {
+        addLog('🕌 [ISLAMIC] IMDB معطَّل — حساب إسلامي', 'info');
+      }
+      if (_aiTradingMode && CFG.AI_SIGNAL_ENABLED) {
+        setTimeout(_startAISignalMonitor, 3000); // wait for DOM to fully render
+      }
+    } catch(_) {}
+  }
+
+  function _startAISignalMonitor() {
+    if (_aiSignalObserver) return; // already running
+    // Selectors PocketOption uses for its own AI signal overlays
+    const AI_SELS = [
+      '[class*="ai-signal"]', '[class*="aiSignal"]', '[class*="ai_signal"]',
+      '[class*="signal-indicator"]', '[class*="prediction"]',
+      '[class*="trend-indicator"]', '[class*="AiPrediction"]',
+      '[data-ai-signal]', '[class*="bot-signal"]',
+    ];
+    const _checkAISignals = () => {
+      for (const sel of AI_SELS) {
+        const el = W.document.querySelector(sel);
+        if (!el) continue;
+        const txt = (el.textContent || el.getAttribute('data-ai-signal') || '').toLowerCase();
+        const isUp   = txt.includes('call') || txt.includes('up') || txt.includes('buy')
+                     || txt.includes('higher') || txt.includes('أعلى') || txt.includes('شراء');
+        const isDown = txt.includes('put')  || txt.includes('down') || txt.includes('sell')
+                     || txt.includes('lower') || txt.includes('أدنى') || txt.includes('بيع');
+        if (!isUp && !isDown) continue;
+        const sig = isUp ? 'BUY' : 'SELL';
+        if (sig !== _lastAISignal || Date.now() - _lastAISignalTs > CFG.AI_SIGNAL_TTL_MS) {
+          _lastAISignal   = sig;
+          _lastAISignalTs = Date.now();
+          addLog('🤖 [AI-Platform] إشارة: ' + sig, 'signal');
+        }
+        return;
+      }
+    };
+    _aiSignalObserver = new MutationObserver(_checkAISignals);
+    _aiSignalObserver.observe(W.document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class','data-ai-signal'] });
+    addLog('🤖 [AI-MONITOR] مُفعَّل — مراقبة إشارات المنصة', 'info');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
   // § 30  الإقلاع
   // ══════════════════════════════════════════════════════════════════════
   function init() {
@@ -6165,12 +6348,16 @@
     const _startAfterUI = () => {
       if (_bootFired) return;   // ← strict gate: exactly-once regardless of path
       _bootFired = true;
+      // v12.4: read AppData before initUI so HUD can reflect account type
+      _readAppData();
       initUI();
       _startSignalWatcher();
       _startStreamWatchdog();
       // v12.3: mini-backtest runs 2s after boot (candleBuffers needs time to fill)
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
-      addLog('⚡ V12.3_SUPREME | SUPREME-PRED v2 | VOL-GATE ✓ | PPT-Decay ✓ | AdaptiveConf ✓ | Backtest ✓', 'signal');
+      // v12.4: retry AppData after 2s — some globals populate asynchronously
+      if (!_appData) setTimeout(_readAppData, 2000);
+      addLog('⚡ V12.4_SUPREME | AppData ✓ | AI-Monitor ✓ | MobileBtn ✓ | Islamic ✓', 'signal');
     };
 
     if (W.document.body) {
