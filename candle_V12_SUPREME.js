@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | 30-Algo Weighted Engine | 70%+ Win Rate
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | 30-Algo + Telemetry-Driven Sync (v12.2)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.1.0
-// @description  V12: SUPREME-PRED v2 | Group A/B/C/D Weighted Voting | Kalman | Hurst R/S | Regime Classifier | Adaptive Learning | 70% Confidence Gate
+// @version      12.2.0
+// @description  V12.2: Per-WS event scoping | updateAssets payout map | Stream Watchdog | percentProfit Kelly | All v12.1 improvements preserved
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -13,6 +13,48 @@
 // ==/UserScript==
 
 /*
+ * ════════════════════════════════════════════════════════════════════════
+ *  v12.2 — TELEMETRY-DRIVEN SYNC UPGRADE (built on v12.1 SUPREME-PRED v2)
+ *
+ *  📡 مبني على تحليل عميق لـ aoirusra_spy.txt + spy_injected.js + raw_extractor
+ *  ✅ كل تحسينات v12.1 محفوظة بالكامل (30 خوارزمية، Kalman، Hurst، الحراس).
+ *
+ *  🎯 الإصلاحات الأربعة (مستهدفة، منخفضة الخطر):
+ *
+ *  [A] PER-WS _pendingEvent (إصلاح race-condition):
+ *  ├─ المشكلة: 3 مقابس متزامنة (chat-po, events-po, demo-api-eu) تستخدم
+ *  │           جميعها socket.io. _pendingEvent العام يسرّب أسماء الأحداث
+ *  │           بين المقابس عند وصول 45N- على أحدها قبل ثنائي على آخر.
+ *  ├─ الحل: WeakMap<ws, {name, ts}> + TTL 500ms — كل مقبس يُربط بحدثه فقط.
+ *  └─ نتيجة: لا أحداث مغلوطة، لا "binary" غامض.
+ *
+ *  [B] updateAssets parser → خريطة عوائد دقيقة:
+ *  ├─ المشكلة: Kelly يستخدم 0.85 ثابت أو يستخلص من deals بعد إغلاق صفقة.
+ *  ├─ الحل: يحلّل رسالة updateAssets (44KB في بداية الجلسة) ويبني
+ *  │       _assetPayouts: Map<asset, payout%> + يحدّث _dynamicPayout
+ *  │       عند تغيير الزوج فوراً.
+ *  └─ نتيجة: Kelly يعرف العائد الحقيقي للأصل النشط من اللحظة الأولى.
+ *
+ *  [C] Stream Watchdog:
+ *  ├─ المشكلة: انقطاع updateStream (فشل البث، تغيير المنطقة، tab background)
+ *  │           لا يُكتشف — البوت يدخل صفقات على بيانات قديمة.
+ *  ├─ الحل: _lastTickMs + فحص كل ثانية. إذا > 5ث بلا تيك → _streamStalled
+ *  │       يمنع executeTrade ويلغي PredictiveExecution.
+ *  └─ نتيجة: لا صفقات على state بائس.
+ *
+ *  [D] percentProfit-based payout learning:
+ *  ├─ المشكلة: V12.1 يستخلص العائد من profit/amount — يعمل على الفوز فقط.
+ *  ├─ الحل: قراءة deal.percentProfit مباشرة (متوفر للفوز والخسارة).
+ *  └─ نتيجة: تعلّم العائد على كل صفقة، ليس 50% من الصفقات.
+ *
+ *  🔗 المصدر التحليلي:
+ *  ├─ aoirusra_spy_20260504T103932.txt: 1413 إطار عبر 4 مقابس
+ *  ├─ WS#3 = wss://demo-api-eu.po.market: 807 إطار (الأهم)
+ *  ├─ updateStream: ~38B تيك حي 5-10/ثانية
+ *  ├─ updateAssets: 44KB دفعة واحدة في البداية
+ *  ├─ successopenOrder/successcloseOrder: 426-468B JSON ثنائي بـ percentProfit
+ *  └─ socket.io 4.5: 451-["event",...] قبل كل ثنائي
+ *
  * ════════════════════════════════════════════════════════════════════════
  *  v10.7 — TREND GUARD FIX
  *
@@ -344,6 +386,18 @@
   let windowAsset     = null;
   let windowPeriod    = 0;
   let _pendingEvent   = null;
+  // ── v12.2 [SYNC] Per-WS pending-event map (race-condition fix) ──────────
+  // Multiple sockets (chat-po + events-po + demo-api-eu) emit 45N- prefix
+  // frames concurrently. A single global _pendingEvent let frames steal each
+  // others' event names. Now scoped per-WS via WeakMap with TTL guard.
+  const _pendingEventMap = new WeakMap();   // ws → { name, ts }
+  const _PENDING_EVENT_TTL_MS = 500;        // stale binding expires
+  // ── v12.2 [SYNC] Stream-gap watchdog ────────────────────────────────────
+  let _lastTickMs       = 0;
+  let _streamStalled    = false;
+  // ── v12.2 [PAYOUT] Real per-asset payout from updateAssets ──────────────
+  const _assetPayouts   = new Map();        // normalizedAsset → 0..1
+  const _assetIsOpen    = new Map();        // normalizedAsset → bool
 
   // ══════════════════════════════════════════════════════════════════════
   // § 2.5  ✅ v10.9 — Adaptive Cooldown + SubSecond Trade Manager
@@ -1051,7 +1105,11 @@
     if (total < 10) return CFG.DEFAULT_AMOUNT;
     const wr = STATS.wins / total;
     const lr = STATS.losses / total;
-    const avgWinLoss = (_dynamicPayout !== null && _dynamicPayout > 0) ? _dynamicPayout : 0.85;
+    // v12.2 [PAYOUT] Per-asset payout (from updateAssets) > _dynamicPayout (from closed deals) > 0.85 fallback
+    const liveP = (typeof getActiveAssetPayout === 'function') ? getActiveAssetPayout() : null;
+    const avgWinLoss = (liveP !== null && liveP > 0) ? liveP
+                     : (_dynamicPayout !== null && _dynamicPayout > 0) ? _dynamicPayout
+                     : 0.85;
     const kellyFraction = wr - (lr / avgWinLoss);
     if (kellyFraction <= 0) return CFG.KELLY_MIN;
     const kellyAmount = balance * (kellyFraction * CFG.KELLY_FRACTION);
@@ -1890,7 +1948,18 @@
     const toBuffer = rawData instanceof Blob ? rawData.arrayBuffer() : Promise.resolve(rawData);
     toBuffer.then(buf => {
       PERF.mark('decodeStart');
-      const evName = _pendingEvent || 'binary';
+      // v12.2 [SYNC] Resolve event name from per-WS map (with TTL fallback)
+      let evName = 'binary';
+      if (wsRef && _pendingEventMap.has(wsRef)) {
+        const slot = _pendingEventMap.get(wsRef);
+        if (slot && (Date.now() - slot.ts) <= _PENDING_EVENT_TTL_MS) {
+          evName = slot.name || 'binary';
+        }
+        _pendingEventMap.delete(wsRef);
+      } else if (_pendingEvent) {
+        // Legacy fallback when wsRef unavailable
+        evName = _pendingEvent;
+      }
       _pendingEvent = null;
 
       if (CFG.Q1_SIG_ENABLED) {
@@ -1919,6 +1988,11 @@
             try { const s = typeof chart.settings==='string' ? JSON.parse(chart.settings) : (chart.settings||{}); const ft = parseInt(s?.fastTimeframe, 10); if (Number.isFinite(ft) && ft>=1 && ft<=3600) onPlatformTimeframe(ft,'updateCharts'); _extractFastCloseAt(s, chart); } catch(_){}
           }
         }
+        // v12.2 [PAYOUT] updateAssets — broker sends full asset list with payouts at session start
+        // Format observed in telemetry: array of [symbol, name, payoutPct, isOpen?, ...]
+        if (evName==='updateAssets' && Array.isArray(decoded)) {
+          processUpdateAssets(decoded);
+        }
         return;
       }
 
@@ -1941,7 +2015,21 @@
 
   function handleTextMessage(raw, wsRef) {
     if (!raw || raw==='2' || raw==='3') return;
-    if (raw.startsWith('45')) { const d = raw.indexOf('-'); if (d!==-1) { try { const arr = JSON.parse(raw.slice(d+1)); if (Array.isArray(arr) && typeof arr[0]==='string') _pendingEvent = arr[0]; } catch(_){} } return; }
+    if (raw.startsWith('45')) {
+      const d = raw.indexOf('-');
+      if (d!==-1) {
+        try {
+          const arr = JSON.parse(raw.slice(d+1));
+          if (Array.isArray(arr) && typeof arr[0]==='string') {
+            const evN = arr[0];
+            _pendingEvent = evN; // legacy global retained for compatibility
+            // v12.2 [SYNC] Per-WS scoping: bind event to THIS socket only
+            if (wsRef) _pendingEventMap.set(wsRef, { name: evN, ts: Date.now() });
+          }
+        } catch(_){}
+      }
+      return;
+    }
     if (!raw.startsWith('42')) return;
     let payload; try { payload = JSON.parse(raw.slice(2)); } catch { return; }
     if (!Array.isArray(payload) || payload.length < 2) return;
@@ -1986,6 +2074,49 @@
     }
   }
 
+  // ── v12.2 [PAYOUT] updateAssets parser ─────────────────────────────────
+  // PocketOption emits a 44KB msgpack array of asset descriptors at session
+  // start. Each entry is roughly: [id, symbol, name, _typeFlag, payoutPct, isOpen, ...]
+  // The exact tuple ordering varies by build — we probe defensively for the
+  // first numeric in [50,100] (payout) and the first boolean (isOpen).
+  function processUpdateAssets(decoded) {
+    let parsed = 0;
+    for (const item of decoded) {
+      if (!Array.isArray(item) || item.length < 3) continue;
+      let symbol = null, payout = null, isOpen = null;
+      for (const f of item) {
+        if (symbol === null && typeof f === 'string' && f.length >= 2 && f.length <= 32 && /^[A-Z0-9_/-]+$/i.test(f)) {
+          symbol = f;
+        } else if (payout === null && typeof f === 'number' && f >= 50 && f <= 100) {
+          payout = f;
+        } else if (isOpen === null && typeof f === 'boolean') {
+          isOpen = f;
+        }
+      }
+      if (symbol && payout !== null) {
+        const a = normalizeAsset(symbol);
+        _assetPayouts.set(a, payout / 100);
+        if (isOpen !== null) _assetIsOpen.set(a, isOpen);
+        parsed++;
+      }
+    }
+    if (parsed > 0) {
+      addLog('💰 [PAYOUT] قرأت ' + parsed + ' أصل من updateAssets', 'info');
+      // If we have an active asset, hot-update its payout immediately
+      if (activeAsset && _assetPayouts.has(activeAsset)) {
+        _dynamicPayout = _assetPayouts.get(activeAsset);
+      }
+    }
+  }
+  // ── v12.2 [PAYOUT] Active-asset payout lookup (used by Kelly) ──────────
+  function getActiveAssetPayout() {
+    if (activeAsset && _assetPayouts.has(activeAsset)) {
+      const p = _assetPayouts.get(activeAsset);
+      if (p > 0.5 && p < 1.5) return p;
+    }
+    return _dynamicPayout;
+  }
+
   function processCloseOrder(data) {
     if (!data.deals || !data.deals[0]) return;
     const deal = data.deals[0];
@@ -1993,12 +2124,20 @@
     if (deal.id) botOrderIds.delete(deal.id);
     const win = deal.profit > 0;
     // V11: Extract dynamic payout ratio from deal data
-    if (win && deal.profit && deal.amount && deal.amount > 0) {
-      const rawPayout = deal.profit / deal.amount;
-      if (rawPayout > 0.5 && rawPayout < 2.0) {
-        _dynamicPayout = rawPayout;
-        addLog('📊 [KELLY] نسبة العائد: ' + Math.round(rawPayout * 100) + '%', 'info');
+    // v12.2 [PAYOUT] Prefer broker-published percentProfit (works on losses too)
+    let rawPayout = null;
+    if (typeof deal.percentProfit === 'number' && deal.percentProfit >= 50 && deal.percentProfit <= 100) {
+      rawPayout = deal.percentProfit / 100;
+    } else if (win && deal.profit && deal.amount && deal.amount > 0) {
+      rawPayout = deal.profit / deal.amount;
+    }
+    if (rawPayout !== null && rawPayout > 0.5 && rawPayout < 2.0) {
+      _dynamicPayout = rawPayout;
+      // v12.2 [PAYOUT] Also cache per-asset for live refresh on next changeSymbol
+      if (deal.asset) {
+        _assetPayouts.set(normalizeAsset(deal.asset), rawPayout);
       }
+      if (win) addLog('📊 [KELLY] نسبة العائد: ' + Math.round(rawPayout * 100) + '%', 'info');
     }
     recordTrade(win, _lastTradeWasTVE);
     const sym = win ? '✅' : '❌', amount = win ? '+'+deal.profit?.toFixed(2)+'$' : '-'+deal.amount+'$';
@@ -2047,6 +2186,11 @@
     activeAsset = a; _sCandle.reset(); PatternStateMachine.reset(); TickVelocityEngine.reset();
     fastCloseAt = 0; cancelPredictiveExecution(); _rebuildPayloadCache();
     _candlesSinceAssetChange = 0;
+    // v12.2 [PAYOUT] Hot-swap dynamic payout when asset changes
+    if (_assetPayouts.has(a)) {
+      const newP = _assetPayouts.get(a);
+      if (newP > 0.5 && newP < 1.5) _dynamicPayout = newP;
+    }
     addLog('🎯 الزوج: '+activeAsset+' ('+source+')', 'asset'); updateHUD();
   }
 
@@ -2073,6 +2217,12 @@
     PERF.mark('tickRecv');
     if (!asset || !price || isNaN(price)) return;
     const a = normalizeAsset(asset), now = Date.now();
+    // v12.2 [SYNC] Stream watchdog: every tick refreshes liveness
+    _lastTickMs = now;
+    if (_streamStalled) {
+      _streamStalled = false;
+      addLog('✅ [STREAM] استعاد التدفق', 'signal');
+    }
     if (!tickBuffers[a]) tickBuffers[a] = [];
     if (!currentCandles[a]) currentCandles[a] = null;
     tickBuffers[a].push(price);
@@ -3064,6 +3214,12 @@
     const bucket = Math.floor(now / 50);
     if (bucket === _subSecondBucket) return;   // صامت — طبيعي جداً
 
+    // حارس 0b: ✅ v12.2 [STREAM-GUARD] منع الدخول على بيانات قديمة
+    if (_streamStalled) {
+      addLog('⛔ [STREAM] التدفق متوقف — رفض الصفقة', 'error');
+      return;
+    }
+
     // حارس 1: وقف الخسائر
     if (_lossStreakPauseUntil > now) {
       addLog('⛔ [H1] وقف تلقائي — تبقى '+Math.ceil((_lossStreakPauseUntil-now)/1000)+'ث','error',
@@ -3360,6 +3516,23 @@
       _readySignal = null;
       executeTrade(dir, a);
     }, CFG.SIGNAL_WATCHER_MS);
+  }
+
+  // ── v12.2 [SYNC] Stream Watchdog ─────────────────────────────────────
+  // Detects loss of updateStream ticks (broker hiccup, tab background, region
+  // failover). When stalled, blocks new entries until ticks resume. Avoids
+  // entering trades on stale state — a major source of unexplained losses.
+  const _STREAM_GAP_MS = 5000;          // > 5s without tick = stalled
+  function _startStreamWatchdog() {
+    _v11_setInterval(() => {
+      if (!_lastTickMs) return;          // never received a tick yet
+      const gap = Date.now() - _lastTickMs;
+      if (gap > _STREAM_GAP_MS && !_streamStalled) {
+        _streamStalled = true;
+        cancelPredictiveExecution();
+        addLog('⚠️ [STREAM] انقطع التدفق منذ '+(gap/1000|0)+'ث — تم التعليق', 'error');
+      }
+    }, 1000);
   }
 
   // ✅ v10.10.1 FIX#TIMING: تنفيذ فوري للإشارة المعلّقة فور رفع القفل
@@ -5752,7 +5925,8 @@
       _bootFired = true;
       initUI();
       _startSignalWatcher();
-      addLog('⚡ V12_SUPREME | SUPREME-PRED v2 | 70% gate | 30 algos | IMDB ✓ | Signal Watcher ✓', 'signal');
+      _startStreamWatchdog();
+      addLog('⚡ V12.2_SUPREME | SUPREME-PRED v2 | 70% gate | 30 algos | IMDB ✓ | Watchers ✓ | Stream Guard ✓', 'signal');
     };
 
     if (W.document.body) {
