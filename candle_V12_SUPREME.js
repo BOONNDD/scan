@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.11)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.12)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.11.0
-// @description  V12.11: IndexedDB persistent storage (trades/signals/logs/candles) + GitHub batch sync
+// @version      12.12.0
+// @description  V12.12: auto-fix min/max amount on failopenOrder | clear orphan DB record on fail
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -2504,6 +2504,17 @@
   function onFailOrder(data) {
     const errMap = { IncorrectMinAmount:'الحد الأدنى: $'+data.amount, IncorrectMaxAmount:'الحد الأقصى: $'+data.amount, InsufficientFunds:'رصيد غير كاف', TradingDisabled:'التداول معطّل', MarketClosed:'السوق مغلق' };
     addLog('❌ '+(errMap[data.error]||data.error||'خطأ'), 'error');
+    // v12.12 [FIX] Auto-adjust amount on min/max errors (confirmed from real-account failopenOrder logs)
+    if (data.error === 'IncorrectMinAmount' && data.amount > 0) {
+      tradeAmount = data.amount;
+      _rebuildPayloadCache();
+      addLog('⚙️ [AUTO] رفع المبلغ تلقائياً → $' + data.amount + ' (الحد الأدنى للمنصة)', 'signal');
+    } else if (data.error === 'IncorrectMaxAmount' && data.amount > 0) {
+      tradeAmount = data.amount;
+      _rebuildPayloadCache();
+      addLog('⚙️ [AUTO] خفض المبلغ تلقائياً → $' + data.amount + ' (الحد الأقصى للمنصة)', 'signal');
+    }
+    _pendingTradeRecord = null; // v12.12: clear pending so DB doesn't store failed open as orphan
     tradeExec = false; updateTradeBtn();
     setTimeout(_tryFirePendingSignal, 0);
   }
@@ -7425,7 +7436,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.11_SUPREME | IndexedDB✓ | GH-Sync✓ | BTN-pointer✓ | session:' + _SESSION_ID, 'signal');
+      addLog('⚡ V12.12_SUPREME | autoAmountFix✓ | real-server:api-spb✓ | session:' + _SESSION_ID, 'signal');
     };
 
     if (W.document.body) {
