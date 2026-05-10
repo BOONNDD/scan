@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.5)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.6)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.6.0
-// @description  V12.6: AI always-on (4 methods) | Chat AI signals uid≤20 | WS reconnect fix | SQUEEZE 0.40
+// @version      12.7.0
+// @description  V12.7: AI Signal Correlation Tracker | Full payload log | uid≤20 strategy discovery
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -521,6 +521,11 @@
   let _lastAISignal        = null;   // 'BUY' | 'SELL' | null
   let _lastAISignalTs      = 0;      // timestamp of last signal
   let _aiSignalObserver    = null;   // MutationObserver handle
+  // ── v12.7 [AI-CORR] AI signal correlation tracker ────────────────────────
+  // Collects every uid≤20 signal with price snapshots to compute real win rate
+  const _aiSignalLog       = [];     // array of {ts, uid, dir, asset, priceAt, price10s, price30s, price60s, result10, result30, result60}
+  const _aiPendingChecks   = [];     // [{ts, dir, priceAt, check10, check30, check60}]
+  let   _aiLogStats        = {w10:0, l10:0, w30:0, l30:0, w60:0, l60:0}; // running win/loss counts
   // ── v12.5 [PLATFORM] version watcher ─────────────────────────────────────
   let _platformVersion     = 0;      // platform/main.js?v= value read from DOM
   // ── v12.5 [WS#1] chat-po.site signal harvesting ──────────────────────────
@@ -2295,8 +2300,8 @@
             const isSystem = uid > 0 && uid <= 20;
             const sig = _classifyAIText(text, '');
             if (sig && isSystem) {
-              // Strong signal: platform AI account → use as direct AI signal
-              _applyAISignal(sig, 'AI-uid' + uid);
+              // Strong signal: platform AI account → record full payload + track correlation
+              _applyAISignal(sig, 'AI-uid' + uid, uid, msg);
             } else if (sig && isChatWS) {
               // Community vote: increment tally for contrarian use
               if (sig === 'BUY')  { _chatBuyVotes++;  _chatSignalTs = Date.now(); }
@@ -6404,6 +6409,96 @@
   // § 29.7  v12.4 — AppData Reader + AI Signal Monitor
   // ══════════════════════════════════════════════════════════════════════
 
+  // ══════════════════════════════════════════════════════════════════════
+  // § 29.8  v12.7 — AI Signal Correlation Tracker
+  // ══════════════════════════════════════════════════════════════════════
+  // Purpose: Record every AI signal (uid≤20 from WS#1) with price context,
+  // then check price at +10s/+30s/+60s to measure real win rate.
+  // This will reveal the AI strategy: timeframe, accuracy, signal frequency.
+
+  function _recordAISignal(uid, dir, rawPayload) {
+    const now   = Date.now();
+    const asset = activeAsset || '?';
+    // Get current price from last tick
+    const buf   = tickBuffers[asset];
+    const priceAt = buf && buf.length ? buf[buf.length - 1][1] : null;
+
+    // Log FULL raw payload to localStorage for offline analysis
+    try {
+      const key = '_ai_sig_' + now;
+      const entry = { ts: now, uid, dir, asset, period: candlePeriod, priceAt, raw: rawPayload };
+      W.localStorage.setItem(key, JSON.stringify(entry));
+      // Keep only last 200 entries (rotate old)
+      const keys = [];
+      for (let i = 0; i < W.localStorage.length; i++) {
+        const k = W.localStorage.key(i);
+        if (k && k.startsWith('_ai_sig_')) keys.push(k);
+      }
+      keys.sort();
+      while (keys.length > 200) { W.localStorage.removeItem(keys.shift()); }
+    } catch(_) {}
+
+    addLog('🤖 [AI-uid' + uid + '] ' + dir + ' | أصل:' + asset + ' | سعر:' + (priceAt || '?') + ' | raw:' + JSON.stringify(rawPayload).slice(0, 200), 'signal');
+
+    if (!priceAt) return; // can't track without a price reference
+
+    // Schedule price checks at +10s, +30s, +60s
+    const check = { ts: now, uid, dir, asset, priceAt, checked: {t10:false, t30:false, t60:false} };
+    _aiPendingChecks.push(check);
+
+    setTimeout(() => _resolveAICheck(check, 10),  10000);
+    setTimeout(() => _resolveAICheck(check, 30),  30000);
+    setTimeout(() => _resolveAICheck(check, 60),  60000);
+  }
+
+  function _resolveAICheck(check, secKey) {
+    const asset = check.asset;
+    const buf   = tickBuffers[asset];
+    const price = buf && buf.length ? buf[buf.length - 1][1] : null;
+    if (!price || check.checked['t'+secKey]) return;
+    check.checked['t'+secKey] = true;
+
+    const won = check.dir === 'BUY' ? price > check.priceAt : price < check.priceAt;
+    const delta = (price - check.priceAt).toFixed(5);
+
+    if (secKey === 10)  { if (won) _aiLogStats.w10++; else _aiLogStats.l10++; }
+    if (secKey === 30)  { if (won) _aiLogStats.w30++; else _aiLogStats.l30++; }
+    if (secKey === 60)  { if (won) _aiLogStats.w60++; else _aiLogStats.l60++; }
+
+    const total = secKey===10 ? (_aiLogStats.w10+_aiLogStats.l10)
+                : secKey===30 ? (_aiLogStats.w30+_aiLogStats.l30)
+                :               (_aiLogStats.w60+_aiLogStats.l60);
+    const wins  = secKey===10 ? _aiLogStats.w10 : secKey===30 ? _aiLogStats.w30 : _aiLogStats.w60;
+    const wr    = total > 0 ? Math.round(wins/total*100) : 0;
+
+    addLog(
+      (won ? '✅' : '❌') + ' [AI+' + secKey + 's] ' + check.dir +
+      ' | Δ' + delta + ' | WR' + secKey + 's: ' + wr + '% (' + wins + '/' + total + ')',
+      won ? 'signal' : 'error'
+    );
+
+    // Once we have ≥10 samples at any window, evaluate whether to use as primary signal
+    if (total >= 10 && secKey === 30) {
+      addLog('📊 [AI-STRATEGY] ' + total + ' إشارة — دقة 30ث: ' + wr + '%' +
+        (wr >= 65 ? ' ✅ قابل للاستخدام كإشارة رئيسية!' :
+         wr >= 55 ? ' ⚠️ ضعيف — استخدم كـ boost فقط' : ' ❌ غير موثوق'), 'signal');
+    }
+  }
+
+  // Expose AI log dump to console for manual inspection
+  try {
+    W._dumpAISignals = () => {
+      const keys = [];
+      for (let i = 0; i < W.localStorage.length; i++) {
+        const k = W.localStorage.key(i);
+        if (k && k.startsWith('_ai_sig_')) keys.push(k);
+      }
+      const data = keys.sort().map(k => { try { return JSON.parse(W.localStorage.getItem(k)); } catch(_) { return null; } }).filter(Boolean);
+      console.table(data.map(d => ({ uid: d.uid, dir: d.dir, asset: d.asset, period: d.period, price: d.priceAt, ts: new Date(d.ts).toISOString(), raw: JSON.stringify(d.raw).slice(0,80) })));
+      return data;
+    };
+  } catch(_) {}
+
   // v12.5 [BUG-1] Islamic CSS detection — loaded stylesheet is more reliable than AppData global
   function _detectIslamicViaCSS() {
     try {
@@ -6502,13 +6597,18 @@
     return null;
   }
 
-  function _applyAISignal(sig, source) {
+  function _applyAISignal(sig, source, uid, rawPayload) {
     if (!sig) return;
     const now = Date.now();
     if (sig === _lastAISignal && now - _lastAISignalTs < 5000) return; // dedup 5s
     _lastAISignal   = sig;
     _lastAISignalTs = now;
-    addLog('🤖 [AI:' + source + '] إشارة: ' + sig, 'signal');
+    // v12.7: record and track correlation for uid≤20 signals
+    if (uid && uid <= 20 && rawPayload !== undefined) {
+      _recordAISignal(uid, sig, rawPayload);
+    } else {
+      addLog('🤖 [AI:' + source + '] إشارة: ' + sig, 'signal');
+    }
   }
 
   function _startAISignalMonitor() {
@@ -6611,7 +6711,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.6_SUPREME | AI×4✓ | ChatAI✓ | WSReconnect✓ | SQUEEZE0.40✓', 'signal');
+      addLog('⚡ V12.7_SUPREME | AI-Corr✓ | FullPayload✓ | WR-Tracker✓ | console: _dumpAISignals()', 'signal');
     };
 
     if (W.document.body) {
