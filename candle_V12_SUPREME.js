@@ -523,9 +523,13 @@
   let _aiSignalObserver    = null;   // MutationObserver handle
   // ── v12.7 [AI-CORR] AI signal correlation tracker ────────────────────────
   // Collects every uid≤20 signal with price snapshots to compute real win rate
-  const _aiSignalLog       = [];     // array of {ts, uid, dir, asset, priceAt, price10s, price30s, price60s, result10, result30, result60}
+  const _aiSignalLog       = [];     // array of {ts, uid, dir, asset, priceAt, ...}
   const _aiPendingChecks   = [];     // [{ts, dir, priceAt, check10, check30, check60}]
-  let   _aiLogStats        = {w10:0, l10:0, w30:0, l30:0, w60:0, l60:0}; // running win/loss counts
+  let   _aiLogStats        = {w10:0, l10:0, w30:0, l30:0, w60:0, l60:0};
+  // ── v12.7 [SPY] raw WS#1/WS#2 entry store ────────────────────────────────
+  const _spyEntries        = [];     // [{ts, src, evName, uid, payload, isAI}]
+  let   _spyFilter         = 'all';  // current filter tab
+  let   _spyAICount        = 0;      // total uid≤20 entries
   // ── v12.5 [PLATFORM] version watcher ─────────────────────────────────────
   let _platformVersion     = 0;      // platform/main.js?v= value read from DOM
   // ── v12.5 [WS#1] chat-po.site signal harvesting ──────────────────────────
@@ -2277,11 +2281,15 @@
       const isEventWS = !!(wsRef._url && wsRef._url.includes('events-po'));
       const prefix = isChatWS ? '[WS#1-CHAT]' : isEventWS ? '[WS#2-EVT]' : '[WS-UNK]';
 
-      // Log each unknown event ONCE for discovery
+      // v12.7 [SPY] Add to SPY panel — FULL payload, no truncation
+      const uid0 = (() => { try { return parseInt(data?.user_id||data?.userId||data?.message?.user_id||0,10); } catch(_){return 0;} })();
+      _spyAdd(prefix, evName, uid0, data);
+
+      // Log unknown event name once (short preview only for main log)
       if (!_chatSignalSeen.has(evName)) {
         _chatSignalSeen.add(evName);
-        const preview = JSON.stringify(data).slice(0, 120);
-        addLog('🔍 ' + prefix + ' غير معروف: "' + evName + '" → ' + preview, 'info');
+        const preview = JSON.stringify(data).slice(0, 80);
+        addLog('🔍 ' + prefix + ' "' + evName + '" → ' + preview + ' …[SPY↑]', 'info');
       }
 
       // v12.6 [AI-CHAT] CONFIRMED by live log: chat_room_list_update from user_id=3 sends "📈"/"📉"
@@ -4169,6 +4177,40 @@
   #cbLogToggle.visible{display:flex;}
   #cbLogCount{background:rgba(255,176,32,0.15);color:#ffb020;border-radius:8px;padding:1px 5px;font-size:7.5px;min-width:16px;text-align:center;}
   #cbStatus{padding:6px 14px 8px;font-size:8px;color:rgba(255,255,255,0.18);font-family:'SF Mono',ui-monospace,monospace;border-top:1px solid rgba(255,255,255,0.04);letter-spacing:0.3px;flex-shrink:0;background:rgba(0,0,0,0.2);border-radius:0 0 22px 22px;}
+  /* ── SPY PANEL ── */
+  #cbSpyPanel{position:fixed;bottom:80px;right:8px;width:360px;max-width:96vw;max-height:80vh;background:#04060a;border:1.5px solid rgba(0,210,255,0.22);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,0.95);display:none;flex-direction:column;overflow:hidden;z-index:2147483645;touch-action:none;direction:ltr;}
+  #cbSpyPanel.open{display:flex;}
+  #cbSpyHdr{display:flex;align-items:center;gap:7px;padding:10px 12px 9px;border-bottom:1px solid rgba(0,210,255,0.1);cursor:grab;background:rgba(0,210,255,0.04);flex-shrink:0;}
+  #cbSpyHdr:active{cursor:grabbing;}
+  .spy-title{font-size:10px;font-weight:800;color:rgba(0,210,255,0.9);letter-spacing:0.6px;flex:1;}
+  .spy-badge{font-size:8px;font-weight:700;padding:2px 7px;border-radius:8px;background:rgba(0,210,255,0.12);border:1px solid rgba(0,210,255,0.25);color:rgba(0,210,255,0.8);}
+  .spy-badge.ai{background:rgba(0,210,100,0.12);border-color:rgba(0,210,100,0.3);color:#00d264;}
+  .spy-hdr-btns{display:flex;gap:4px;flex-shrink:0;}
+  .spy-btn{padding:3px 9px;border-radius:7px;border:1px solid rgba(255,255,255,0.09);background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.45);font-size:8.5px;font-weight:700;cursor:pointer;font-family:inherit;}
+  .spy-btn:hover{background:rgba(0,210,255,0.1);border-color:rgba(0,210,255,0.3);color:rgba(0,210,255,0.9);}
+  .spy-btn.copy-ok{background:rgba(0,210,100,0.15);border-color:rgba(0,210,100,0.4);color:#00d264;}
+  #cbSpyFilters{display:flex;gap:4px;padding:7px 10px 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,0.04);overflow-x:auto;}
+  .spy-filter{padding:2px 10px;border-radius:10px;border:1px solid rgba(255,255,255,0.07);background:transparent;color:rgba(255,255,255,0.25);font-size:8px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;}
+  .spy-filter.active{background:rgba(0,210,255,0.12);border-color:rgba(0,210,255,0.3);color:rgba(0,210,255,0.9);}
+  #cbSpyScroll{overflow-y:auto;flex:1;padding:6px 0;}
+  #cbSpyScroll::-webkit-scrollbar{width:3px;} #cbSpyScroll::-webkit-scrollbar-thumb{background:rgba(0,210,255,0.2);border-radius:3px;}
+  .spy-entry{padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.03);font-family:'SF Mono',ui-monospace,monospace;}
+  .spy-entry.ai-signal{background:rgba(0,210,100,0.05);border-left:3px solid rgba(0,210,100,0.5);}
+  .spy-entry.uid-low{background:rgba(255,176,32,0.04);border-left:3px solid rgba(255,176,32,0.4);}
+  .spy-entry-hdr{display:flex;align-items:center;gap:5px;margin-bottom:3px;}
+  .spy-ev-name{font-size:9px;font-weight:700;color:rgba(0,210,255,0.8);}
+  .spy-ev-name.ai{color:#00d264;}
+  .spy-ev-ts{font-size:7.5px;color:rgba(255,255,255,0.2);}
+  .spy-ev-src{font-size:7px;padding:1px 5px;border-radius:5px;border:1px solid rgba(255,255,255,0.07);color:rgba(255,255,255,0.25);}
+  .spy-ev-uid{font-size:8px;font-weight:800;padding:1px 6px;border-radius:6px;background:rgba(255,176,32,0.12);border:1px solid rgba(255,176,32,0.3);color:#ffb020;}
+  .spy-ev-body{font-size:7.5px;color:rgba(255,255,255,0.45);white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto;line-height:1.4;}
+  .spy-ev-body::-webkit-scrollbar{width:2px;} .spy-ev-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);}
+  .spy-ev-copy{font-size:7px;color:rgba(0,210,255,0.4);cursor:pointer;margin-top:2px;display:inline-block;}
+  .spy-ev-copy:hover{color:rgba(0,210,255,0.9);}
+  #cbSpyStats{padding:6px 10px;border-top:1px solid rgba(0,210,255,0.08);font-size:8px;color:rgba(0,210,255,0.5);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;background:rgba(0,0,0,0.3);}
+  #cbSpyBtn{position:fixed;bottom:158px;right:8px;z-index:2147483646;padding:5px 12px;border-radius:10px;background:#04060a;border:1.5px solid rgba(0,210,255,0.3);color:rgba(0,210,255,0.8);font-family:'IBM Plex Sans Arabic',-apple-system,sans-serif;font-size:9px;font-weight:700;cursor:pointer;touch-action:manipulation;display:none;align-items:center;gap:5px;}
+  #cbSpyBtn.visible{display:flex;}
+  #cbSpyCount{background:rgba(0,210,255,0.15);color:rgba(0,210,255,0.9);border-radius:8px;padding:1px 5px;font-size:7.5px;min-width:16px;text-align:center;}
   `;
 
   const HUD_HTML = `
@@ -4324,7 +4366,186 @@
     <div class="cb-log-inner" id="cbLogInner"></div>
   </div>
   <button id="cbLogToggle">📋 السجل <span id="cbLogCount">0</span></button>
+  <button id="cbSpyBtn">🔍 SPY <span id="cbSpyCount">0</span></button>
+  <div id="cbSpyPanel">
+    <div id="cbSpyHdr">
+      <span class="spy-title">🔍 SPY — WS#1/WS#2 Raw Data</span>
+      <span class="spy-badge" id="cbSpyAiCount">AI:0</span>
+      <div class="spy-hdr-btns">
+        <button class="spy-btn" id="cbSpyCopyAll">⎘ Copy All</button>
+        <button class="spy-btn" id="cbSpyCopyAI">★ Copy AI</button>
+        <button class="spy-btn" id="cbSpyClear">✕ Clear</button>
+        <button class="spy-btn" id="cbSpyClose">✕</button>
+      </div>
+    </div>
+    <div id="cbSpyFilters">
+      <button class="spy-filter active" data-f="all">All</button>
+      <button class="spy-filter" data-f="ai">uid≤20 ★</button>
+      <button class="spy-filter" data-f="update">chat_update</button>
+      <button class="spy-filter" data-f="ws1">WS#1</button>
+      <button class="spy-filter" data-f="ws2">WS#2</button>
+    </div>
+    <div id="cbSpyScroll"></div>
+    <div id="cbSpyStats">إدخالات: 0 | AI: 0 | WR-10s: – | WR-30s: –</div>
+  </div>
   `;
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § 27.5  v12.7 — SPY PANEL logic
+  // ══════════════════════════════════════════════════════════════════════
+
+  function _spyAdd(src, evName, uid, payload) {
+    const isAI = uid > 0 && uid <= 20;
+    if (isAI) _spyAICount++;
+
+    const entry = {
+      ts: Date.now(),
+      src,          // 'WS#1-CHAT' | 'WS#2-EVT' | 'WS-UNK'
+      evName,
+      uid,
+      isAI,
+      payload,      // raw object — NO truncation
+      payloadStr: JSON.stringify(payload, null, 2),
+    };
+    _spyEntries.unshift(entry);
+    if (_spyEntries.length > 300) _spyEntries.length = 300;
+
+    // Update counter badge
+    const cnt = W.document.getElementById('cbSpyCount');
+    if (cnt) cnt.textContent = _spyEntries.length;
+    const aiCnt = W.document.getElementById('cbSpyAiCount');
+    if (aiCnt) { aiCnt.textContent = 'AI:' + _spyAICount; aiCnt.className = 'spy-badge' + (_spyAICount > 0 ? ' ai' : ''); }
+
+    // Re-render if panel is open
+    const panel = W.document.getElementById('cbSpyPanel');
+    if (panel && panel.classList.contains('open')) _spyRender();
+  }
+
+  function _spyRender() {
+    const scroll = W.document.getElementById('cbSpyScroll');
+    const stats  = W.document.getElementById('cbSpyStats');
+    if (!scroll) return;
+
+    const filtered = _spyEntries.filter(e => {
+      if (_spyFilter === 'all')    return true;
+      if (_spyFilter === 'ai')     return e.isAI;
+      if (_spyFilter === 'update') return e.evName.includes('update') || e.evName.includes('message');
+      if (_spyFilter === 'ws1')    return e.src.includes('CHAT');
+      if (_spyFilter === 'ws2')    return e.src.includes('EVT');
+      return true;
+    });
+
+    const frag = W.document.createDocumentFragment();
+    for (const e of filtered.slice(0, 80)) {
+      const d = W.document.createElement('div');
+      d.className = 'spy-entry' + (e.isAI ? ' ai-signal' : e.uid > 0 && e.uid <= 100 ? ' uid-low' : '');
+
+      const t = new Date(e.ts);
+      const tsStr = t.getHours().toString().padStart(2,'0') + ':' + t.getMinutes().toString().padStart(2,'0') + ':' + t.getSeconds().toString().padStart(2,'0') + '.' + t.getMilliseconds().toString().padStart(3,'0');
+
+      d.innerHTML =
+        '<div class="spy-entry-hdr">' +
+          '<span class="spy-ev-name' + (e.isAI ? ' ai' : '') + '">' + e.evName + '</span>' +
+          '<span class="spy-ev-ts">' + tsStr + '</span>' +
+          '<span class="spy-ev-src">' + e.src + '</span>' +
+          (e.uid ? '<span class="spy-ev-uid">uid:' + e.uid + (e.isAI ? ' ★' : '') + '</span>' : '') +
+        '</div>' +
+        '<pre class="spy-ev-body">' + e.payloadStr.replace(/</g,'&lt;') + '</pre>' +
+        '<span class="spy-ev-copy" data-idx="' + _spyEntries.indexOf(e) + '">⎘ copy this entry</span>';
+
+      frag.appendChild(d);
+    }
+    scroll.innerHTML = '';
+    scroll.appendChild(frag);
+
+    // Bind copy-entry buttons
+    scroll.querySelectorAll('.spy-ev-copy').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        const e = _spyEntries[idx];
+        if (!e) return;
+        const txt = '=== ' + e.evName + ' [' + e.src + '] uid:' + (e.uid||'-') + ' ts:' + new Date(e.ts).toISOString() + ' ===\n' + e.payloadStr;
+        _spyCopy(txt, btn);
+      });
+    });
+
+    // Update stats
+    if (stats) {
+      const wr10 = (_aiLogStats.w10+_aiLogStats.l10)>0 ? Math.round(_aiLogStats.w10/(_aiLogStats.w10+_aiLogStats.l10)*100)+'%' : '–';
+      const wr30 = (_aiLogStats.w30+_aiLogStats.l30)>0 ? Math.round(_aiLogStats.w30/(_aiLogStats.w30+_aiLogStats.l30)*100)+'%' : '–';
+      stats.textContent = 'إدخالات:' + _spyEntries.length + ' | AI:' + _spyAICount + ' | WR-10s:' + wr10 + ' | WR-30s:' + wr30;
+    }
+  }
+
+  function _spyCopy(text, btn) {
+    try {
+      if (W.navigator.clipboard?.writeText) {
+        W.navigator.clipboard.writeText(text).then(() => { if(btn){btn.textContent='✅ Copied!'; btn.classList.add('copy-ok'); setTimeout(()=>{btn.textContent=btn.dataset.orig||'⎘ Copy All';btn.classList.remove('copy-ok');},1500);} });
+      } else {
+        const ta = W.document.createElement('textarea');
+        ta.value = text; ta.style.cssText='position:fixed;top:-999px;left:-999px;opacity:0;';
+        W.document.body.appendChild(ta); ta.select(); W.document.execCommand('copy');
+        W.document.body.removeChild(ta);
+        if(btn){btn.textContent='✅ Copied!';btn.classList.add('copy-ok');setTimeout(()=>{btn.textContent=btn.dataset.orig||'⎘ Copy';btn.classList.remove('copy-ok');},1500);}
+      }
+    } catch(_) {}
+  }
+
+  function _initSpyPanel() {
+    const spyBtn   = W.document.getElementById('cbSpyBtn');
+    const spyPanel = W.document.getElementById('cbSpyPanel');
+    const spyClose = W.document.getElementById('cbSpyClose');
+    const copAll   = W.document.getElementById('cbSpyCopyAll');
+    const copAI    = W.document.getElementById('cbSpyCopyAI');
+    const clrBtn   = W.document.getElementById('cbSpyClear');
+    const filters  = W.document.querySelectorAll('#cbSpyFilters .spy-filter');
+    const spyHdr   = W.document.getElementById('cbSpyHdr');
+
+    if (!spyBtn || !spyPanel) return;
+
+    // Show spy button when main panel is open
+    W.document.getElementById('cbIcon')?.addEventListener('click', () => {
+      const main = W.document.getElementById('cbPanel');
+      setTimeout(() => { if (spyBtn) spyBtn.classList.toggle('visible', !!(main && main.classList.contains('open'))); }, 50);
+    });
+
+    spyBtn.addEventListener('click', () => {
+      spyPanel.classList.toggle('open');
+      if (spyPanel.classList.contains('open')) { spyBtn.classList.add('visible'); _spyRender(); }
+    });
+    spyClose?.addEventListener('click', () => spyPanel.classList.remove('open'));
+
+    // Copy All
+    copAll?.addEventListener('click', () => {
+      const lines = _spyEntries.map(e => '=== ' + e.evName + ' [' + e.src + '] uid:' + (e.uid||'-') + ' ts:' + new Date(e.ts).toISOString() + ' ===\n' + e.payloadStr).join('\n\n');
+      copAll.dataset.orig = '⎘ Copy All';
+      _spyCopy(lines, copAll);
+    });
+    // Copy AI only (uid ≤ 20)
+    copAI?.addEventListener('click', () => {
+      const lines = _spyEntries.filter(e=>e.isAI).map(e => '=== AI uid:' + e.uid + ' ' + e.evName + ' ts:' + new Date(e.ts).toISOString() + ' ===\n' + e.payloadStr).join('\n\n');
+      copAI.dataset.orig = '★ Copy AI';
+      _spyCopy(lines || '(لا توجد إشارات AI بعد)', copAI);
+    });
+    // Clear
+    clrBtn?.addEventListener('click', () => { _spyEntries.length = 0; _spyAICount = 0; const c=W.document.getElementById('cbSpyCount'); if(c) c.textContent='0'; _spyRender(); });
+
+    // Filters
+    filters.forEach(f => {
+      f.addEventListener('click', () => {
+        filters.forEach(x => x.classList.remove('active'));
+        f.classList.add('active');
+        _spyFilter = f.dataset.f;
+        _spyRender();
+      });
+    });
+
+    // Drag
+    let _dx=0, _dy=0, _dragging=false;
+    spyHdr?.addEventListener('pointerdown', e => { _dragging=true; _dx=e.clientX-spyPanel.getBoundingClientRect().left; _dy=e.clientY-spyPanel.getBoundingClientRect().top; spyHdr.setPointerCapture(e.pointerId); });
+    spyHdr?.addEventListener('pointermove', e => { if(!_dragging) return; spyPanel.style.right='auto'; spyPanel.style.bottom='auto'; spyPanel.style.left=(e.clientX-_dx)+'px'; spyPanel.style.top=(e.clientY-_dy)+'px'; });
+    spyHdr?.addEventListener('pointerup', () => _dragging=false);
+  }
 
   // ─── دوال تحديث الواجهة ─────────────────────────────────────────────
   function updateStatusDot() {
@@ -4708,6 +4929,8 @@
     const logTogBtn=W.document.getElementById('cbLogToggle'), logFloat=W.document.getElementById('cbLogFloat'), logClose=W.document.getElementById('cbLogClose');
     if (logTogBtn&&logFloat) logTogBtn.addEventListener('click', ()=>logFloat.classList.toggle('open'));
     if (logClose&&logFloat)  logClose.addEventListener('click',  ()=>logFloat.classList.remove('open'));
+    // v12.7: init SPY panel
+    _initSpyPanel();
 
     // ✅ v10.8: زر نسخ السجل الكامل
     const logCopyBtn = W.document.getElementById('cbLogCopy');
