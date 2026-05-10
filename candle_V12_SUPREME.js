@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.9)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.10)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.9.0
-// @description  V12.9: tradeExec frozen fix (mobile timer throttle) | AI-Direct WS+button fallback
+// @version      12.10.0
+// @description  V12.10: clickTradeButton full pointer+touch events + extended PO mobile selectors + diagnostic log
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -3971,49 +3971,140 @@
     executeTrade(dir, a);
   }
 
+  // v12.10 [BTN] Full pointer+mouse event sequence — required for React/Vue synthetic events on mobile
+  function _simulateBtn(el) {
+    try {
+      const rect = el.getBoundingClientRect();
+      const cx   = Math.round(rect.left + rect.width  / 2);
+      const cy   = Math.round(rect.top  + rect.height / 2);
+      const base = { bubbles: true, cancelable: true, clientX: cx, clientY: cy };
+      const ptr  = { ...base, pointerId: 1, pointerType: 'touch', isPrimary: true };
+      el.dispatchEvent(new PointerEvent('pointerover',  ptr));
+      el.dispatchEvent(new PointerEvent('pointerenter', ptr));
+      el.dispatchEvent(new PointerEvent('pointerdown',  ptr));
+      try {
+        // TouchEvent constructor may throw in some WebViews — wrap separately
+        const t = new Touch({ identifier: 1, target: el, clientX: cx, clientY: cy, radiusX: 10, radiusY: 10, force: 1 });
+        el.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [t], targetTouches: [t], changedTouches: [t] }));
+        el.dispatchEvent(new TouchEvent('touchend',   { bubbles: true, cancelable: true, touches: [],  targetTouches: [],  changedTouches: [t] }));
+      } catch(_) {}
+      el.dispatchEvent(new PointerEvent('pointerup',    ptr));
+      el.dispatchEvent(new PointerEvent('pointerout',   ptr));
+      el.dispatchEvent(new PointerEvent('pointerleave', ptr));
+      el.dispatchEvent(new MouseEvent('mousedown', { ...base, button: 0 }));
+      el.dispatchEvent(new MouseEvent('mouseup',   { ...base, button: 0 }));
+      el.dispatchEvent(new MouseEvent('click',     { ...base, button: 0 }));
+      el.click();
+    } catch(e) {
+      try { el.click(); } catch(_) {}
+    }
+  }
+
+  function _isBtnReady(el) {
+    return el && !el.disabled && el.getAttribute('aria-disabled') !== 'true'
+      && el.getAttribute('disabled') === null;
+  }
+
   function clickTradeButton(direction) {
     const isCall = direction === 'BUY';
 
-    // v12.4 [MOBILE] CSS selector fast-path — try known mobile selectors first
-    // PocketOption mobile (platform=9): /en/cabinet/demo-quick-high-low uses
-    // "Higher" / "Lower" buttons with specific class patterns
+    // v12.10 [MOBILE] Extended selector list — covers current PO mobile UI classes
     const callSels = [
-      // Mobile-specific (platform=9, quick-high-low page)
-      '[class*="call-button"]:not([disabled])', '[class*="CallButton"]:not([disabled])',
+      // PocketOption current mobile (deal-btn / button--call / trade__btn patterns)
+      'button[class*="call"]:not([disabled])',    'button[class*="Call"]:not([disabled])',
+      'button[class*="buy"]:not([disabled])',     'button[class*="Buy"]:not([disabled])',
+      '[class*="deal-btn"][class*="call"]:not([disabled])',
+      '[class*="deal-btn"][class*="up"]:not([disabled])',
+      '[class*="dealBtn"][class*="call"]:not([disabled])',
+      '[class*="button--call"]:not([disabled])',  '[class*="btn--call"]:not([disabled])',
+      '[class*="trade__btn"][class*="call"]:not([disabled])',
+      '[class*="trade-btn"][class*="call"]:not([disabled])',
+      // Attribute-based
+      '[data-side="call"]:not([disabled])',       '[data-type="call"]:not([disabled])',
+      '[data-direction="call"]:not([disabled])',  '[data-action="call"]:not([disabled])',
+      '[data-side="up"]:not([disabled])',         '[data-type="up"]:not([disabled])',
+      // aria-label
+      '[aria-label*="Higher"]:not([disabled])',   '[aria-label*="higher"]:not([disabled])',
+      '[aria-label*="شراء"]:not([disabled])',      '[aria-label*="أعلى"]:not([disabled])',
+      '[aria-label*="Call"]:not([disabled])',     '[aria-label*="Buy"]:not([disabled])',
+      // Legacy selectors (kept for older PO builds)
+      '[class*="call-button"]:not([disabled])',   '[class*="CallButton"]:not([disabled])',
       '[class*="quick-hl-call"]:not([disabled])', '[class*="QuickHlCall"]:not([disabled])',
-      '[data-side="call"]:not([disabled])', '[data-type="call"]:not([disabled])',
-      '[data-direction="call"]:not([disabled])',
-      // Standard selectors
       '.btn-call', '[class*="btnCall"]', '#call-btn', '#buy-btn',
-      '[class*="buy-btn"]', '[class*="buyBtn"]', '[class*="tradeCall"]',
+      '[class*="buy-btn"]', '[class*="buyBtn"]',  '[class*="tradeCall"]',
     ];
     const putSels = [
-      '[class*="put-button"]:not([disabled])',  '[class*="PutButton"]:not([disabled])',
-      '[class*="quick-hl-put"]:not([disabled])', '[class*="QuickHlPut"]:not([disabled])',
-      '[data-side="put"]:not([disabled])', '[data-type="put"]:not([disabled])',
-      '[data-direction="put"]:not([disabled])',
+      'button[class*="put"]:not([disabled])',     'button[class*="Put"]:not([disabled])',
+      'button[class*="sell"]:not([disabled])',    'button[class*="Sell"]:not([disabled])',
+      '[class*="deal-btn"][class*="put"]:not([disabled])',
+      '[class*="deal-btn"][class*="down"]:not([disabled])',
+      '[class*="dealBtn"][class*="put"]:not([disabled])',
+      '[class*="button--put"]:not([disabled])',   '[class*="btn--put"]:not([disabled])',
+      '[class*="trade__btn"][class*="put"]:not([disabled])',
+      '[class*="trade-btn"][class*="put"]:not([disabled])',
+      '[data-side="put"]:not([disabled])',        '[data-type="put"]:not([disabled])',
+      '[data-direction="put"]:not([disabled])',   '[data-action="put"]:not([disabled])',
+      '[data-side="down"]:not([disabled])',       '[data-type="down"]:not([disabled])',
+      '[aria-label*="Lower"]:not([disabled])',    '[aria-label*="lower"]:not([disabled])',
+      '[aria-label*="بيع"]:not([disabled])',       '[aria-label*="أدنى"]:not([disabled])',
+      '[aria-label*="Put"]:not([disabled])',      '[aria-label*="Sell"]:not([disabled])',
+      '[class*="put-button"]:not([disabled])',    '[class*="PutButton"]:not([disabled])',
+      '[class*="quick-hl-put"]:not([disabled])',  '[class*="QuickHlPut"]:not([disabled])',
       '.btn-put', '[class*="btnPut"]', '#put-btn', '#sell-btn',
       '[class*="sell-btn"]', '[class*="sellBtn"]', '[class*="tradePut"]',
     ];
+
+    // Phase 1: CSS selector fast-path
     for (const sel of (isCall ? callSels : putSels)) {
       try {
         const btn = W.document.querySelector(sel);
-        if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') { btn.click(); return true; }
+        if (_isBtnReady(btn)) { _simulateBtn(btn); addLog('🖱 [BTN] ' + sel.slice(0,40), 'info'); return true; }
       } catch(_) {}
     }
 
-    // React fiber walk + text-match fallback (all buttons)
-    const buttons = W.document.querySelectorAll('button,[role="button"]');
-    for (const btn of buttons) {
-      if (btn.disabled || btn.getAttribute('aria-disabled')==='true') continue;
+    // Phase 2: React fiber walk + text-match over all buttons/roles
+    const allBtns = W.document.querySelectorAll('button,[role="button"],[class*="btn"],[class*="Btn"]');
+    const textCandidates = [];
+    for (const btn of allBtns) {
+      if (!_isBtnReady(btn)) continue;
+      // Fiber direction
       const fiber = _getReactFiber(btn);
-      if (fiber) { const fd = _extractFiberDirection(fiber); if(fd==='call'&&isCall){btn.click();return true;} if(fd==='put'&&!isCall){btn.click();return true;} }
-      // v10.4 FIX#4: text match — handles "↑ شراء", "Higher", "أعلى", "Buy", "Call"
-      const txt = (btn.textContent||btn.innerText||'').trim();
+      if (fiber) {
+        const fd = _extractFiberDirection(fiber);
+        if (fd === 'call' && isCall)  { _simulateBtn(btn); addLog('🖱 [BTN-FIBER] call', 'info'); return true; }
+        if (fd === 'put'  && !isCall) { _simulateBtn(btn); addLog('🖱 [BTN-FIBER] put',  'info'); return true; }
+      }
+      // Text match
+      const txt = (btn.textContent || btn.innerText || '').trim();
       const tl  = txt.toLowerCase();
-      if (isCall  && (txt.includes('شراء')||txt.includes('أعلى')||tl.includes('buy')||tl.includes('call')||txt.includes('↑')||tl.includes('higher'))) { btn.click(); return true; }
-      if (!isCall && (txt.includes('بيع') ||txt.includes('أدنى') ||tl.includes('sell')||tl.includes('put') ||txt.includes('↓')||tl.includes('lower')))  { btn.click(); return true; }
+      const ariaLbl = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const combined = tl + ' ' + ariaLbl;
+      if (isCall  && (txt.includes('شراء')||txt.includes('أعلى')||combined.includes('buy')||combined.includes('call')||txt.includes('↑')||combined.includes('higher')||combined.includes('up'))) {
+        textCandidates.push(btn);
+      }
+      if (!isCall && (txt.includes('بيع')||txt.includes('أدنى')||combined.includes('sell')||combined.includes('put')||txt.includes('↓')||combined.includes('lower')||combined.includes('down'))) {
+        textCandidates.push(btn);
+      }
     }
+    if (textCandidates.length > 0) {
+      // Prefer the button with largest visible area (main trade button, not tiny icons)
+      textCandidates.sort((a, b) => {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return (rb.width * rb.height) - (ra.width * ra.height);
+      });
+      const best = textCandidates[0];
+      const bestTxt = (best.textContent || '').trim().slice(0, 20);
+      _simulateBtn(best);
+      addLog('🖱 [BTN-TEXT] "' + bestTxt + '"', 'info');
+      return true;
+    }
+
+    // Phase 3: diagnostic — log all visible buttons so user can identify the correct one
+    const allVisible = Array.from(W.document.querySelectorAll('button,[role="button"]'))
+      .filter(b => { try { const r = b.getBoundingClientRect(); return r.width > 20 && r.height > 20; } catch(_) { return false; } })
+      .slice(0, 8)
+      .map(b => '"' + (b.textContent||'').trim().slice(0,15) + '" [' + (b.className||'').slice(0,25) + ']');
+    addLog('❌ [BTN] زر ' + direction + ' غير موجود | أزرار المنصة: ' + (allVisible.join(' | ') || 'لا شيء'), 'error');
     return false;
   }
 
