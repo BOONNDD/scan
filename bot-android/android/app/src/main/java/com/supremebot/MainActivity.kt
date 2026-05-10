@@ -15,7 +15,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.*
 import android.widget.*
-import android.widget.PopupMenu
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.*
 import java.net.URLEncoder
@@ -236,11 +235,13 @@ class MainActivity : AppCompatActivity() {
 
         service.onScriptReloaded = { script, version ->
             Log.i(TAG, "New script from server: $version")
-            webViewClient?.cachedScript = script
-            webViewClient?.scriptVersion = version
-            webView.evaluateJavascript("document.readyState") { state ->
-                if (state?.contains("complete") == true || state?.contains("interactive") == true) {
-                    webViewClient?.injectScript(webView, script)
+            runOnUiThread {
+                webViewClient?.cachedScript = script
+                webViewClient?.scriptVersion = version
+                webView.evaluateJavascript("document.readyState") { state ->
+                    if (state?.contains("complete") == true || state?.contains("interactive") == true) {
+                        webViewClient?.injectScript(webView, script)
+                    }
                 }
             }
         }
@@ -324,6 +325,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (webView.canGoBack()) webView.goBack()
         else super.onBackPressed()

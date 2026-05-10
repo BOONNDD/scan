@@ -37,10 +37,9 @@
             android:textSize="13sp"
             android:hint="Search or enter URL"
             android:hintTextColor="#555555"
-            android:singleLine="true"
+            android:maxLines="1"
             android:imeOptions="actionGo"
-            android:inputType="textUri"
-            android:textCursorDrawable="@null" />
+            android:inputType="textUri" />
 
         <TextView
             android:id="@+id/btnOverflowTop"
@@ -81,7 +80,7 @@
             android:text="Connecting..."
             android:textColor="#888888"
             android:textSize="10sp"
-            android:singleLine="true"
+            android:maxLines="1"
             android:ellipsize="end" />
 
         <TextView
