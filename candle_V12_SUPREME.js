@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | 30-Algo + Telemetry-Driven Sync (v12.2)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.3)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.2.0
-// @description  V12.2: Per-WS event scoping | updateAssets payout map | Stream Watchdog | percentProfit Kelly | All v12.1 improvements preserved
+// @version      12.3.0
+// @description  V12.3: VOL-GATE | PPT 3-level+Decay | AdaptiveConf | Mini-Backtest | Breakeven HUD | Bad-Session alert | All v12.2 preserved
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -13,6 +13,20 @@
 // ==/UserScript==
 
 /*
+ * ════════════════════════════════════════════════════════════════════════
+ *  v12.3 — FULL REBUILD ENGINE (7 modules, built on v12.2)
+ *
+ *  🎯 التطبيق الكامل لمقترحات إعادة البناء (Applied ALL rebuild proposals)
+ *
+ *  [CONFIG] assetProfiles + volatilityFilter + adaptiveThresholds params
+ *  [LEARNING] PPT v2: 3-level key (asset::pattern::tf) + decay factor (0.95/day)
+ *  [ADAPTIVE] minConfluence rises with recent loss rate (rolling 20-trade window)
+ *  [DATA] classifyVolatility(): ATR vs 20-candle avg + BB width → SQUEEZE/NORMAL/EXPLOSIVE
+ *  [EXEC] Guard 0c: SQUEEZE → block trade | EXPLOSIVE → require ≥85% SUPREME conf
+ *  [BACKTEST] Mini-backtest at startup: walk-forward on buffered candles → log WR vs breakeven
+ *  [HUD] Breakeven % | Volatility badge (SQUEEZE🔵/NORMAL✅/EXPLOSIVE🔴) | Bad-session banner
+ *
+ *  ✅ كل تحسينات v12.2 محفوظة (Per-WS map, updateAssets, Stream Watchdog, percentProfit)
  * ════════════════════════════════════════════════════════════════════════
  *  v12.2 — TELEMETRY-DRIVEN SYNC UPGRADE (built on v12.1 SUPREME-PRED v2)
  *
@@ -347,6 +361,30 @@
 
     // ─── ATR volatility threshold لتصنيف VOLATILE ──────────────────
     SUPREME_VOLATILE_ATR_MULT: 1.8,  // ATR > 1.8x المتوسط -> VOLATILE
+
+    // ─── 🆕 v12.3 [VOLATILITY] ATR + BB classifier ──────────────────
+    VOLATILITY_ATR_WINDOW     : 20,   // rolling window for avg ATR
+    VOLATILITY_SQUEEZE_MULT   : 0.70, // ATR < 70% of avg → SQUEEZE
+    VOLATILITY_EXPLOSIVE_MULT : 1.80, // ATR > 180% of avg → EXPLOSIVE
+    VOLATILITY_BB_SQUEEZE     : 0.0015, // BB width < 0.15% → confirms SQUEEZE
+
+    // ─── 🆕 v12.3 [ADAPTIVE CONF] adaptive minConfluence ────────────
+    ADAPTIVE_CONF_ENABLED     : true,
+    ADAPTIVE_CONF_WINDOW      : 20,   // rolling trade window
+    ADAPTIVE_CONF_RISE_PER_LOSS: 0.10, // +0.10 conf per % excess loss rate
+    ADAPTIVE_CONF_MAX_BOOST   : 1.5,  // max upward adjustment
+
+    // ─── 🆕 v12.3 [PPT v2] decay & 3-level key ──────────────────────
+    PPT_DECAY_FACTOR          : 0.95, // per-day weight multiplier
+    PPT_DECAY_DAYS            : 3,    // decay starts after this many idle days
+
+    // ─── 🆕 v12.3 [BAD SESSION] warning trigger ──────────────────────
+    BAD_SESSION_MIN_TRADES    : 20,   // min session trades before warning
+    BAD_SESSION_WR_THRESH     : 0.0,  // relative to breakeven (0 = at breakeven)
+
+    // ─── 🆕 v12.3 [MINI BACKTEST] startup forward-test ───────────────
+    MINI_BACKTEST_ENABLED     : true,
+    MINI_BACKTEST_MIN_CANDLES : 15,
   };
 
   // ══════════════════════════════════════════════════════════════════════
@@ -398,6 +436,14 @@
   // ── v12.2 [PAYOUT] Real per-asset payout from updateAssets ──────────────
   const _assetPayouts   = new Map();        // normalizedAsset → 0..1
   const _assetIsOpen    = new Map();        // normalizedAsset → bool
+  // ── v12.3 [VOLATILITY] ATR-based market state ───────────────────────────
+  let _volatilityState  = 'NORMAL';         // 'SQUEEZE' | 'NORMAL' | 'EXPLOSIVE'
+  const _atrHistory     = [];               // rolling ATR values for baseline
+  // ── v12.3 [ADAPTIVE CONF] rolling result window ─────────────────────────
+  const _recentResults  = [];               // 1=win, 0=loss — last N trades
+  // ── v12.3 [SESSION] tracking for bad-session detection ──────────────────
+  let _sessionStartBalance = null;
+  let _miniBacktestDone    = false;
 
   // ══════════════════════════════════════════════════════════════════════
   // § 2.5  ✅ v10.9 — Adaptive Cooldown + SubSecond Trade Manager
@@ -1046,9 +1092,24 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // § F  🆕 [PPT] متتبع أداء الأنماط
+  // § F  🆕 [PPT v2] متتبع أداء الأنماط — 3-level key + decay
   // ══════════════════════════════════════════════════════════════════════
+  // Key format: "ASSET::PatternName::timeframeSec"  (falls back to "PatternName" for legacy data)
   let patternStats = {};
+
+  function _pptKey(pattern, asset, tf) {
+    const a = (asset || activeAsset || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const t = (tf > 0 ? tf : (candlePeriod > 0 ? candlePeriod : 0));
+    return (a && t > 0) ? (a + '::' + pattern + '::' + t) : pattern;
+  }
+
+  // Exponential decay: older entries lose weight after PPT_DECAY_DAYS days
+  function _pptDecayFactor(entry) {
+    if (!entry || !entry.updatedAt) return 1;
+    const days = (Date.now() - entry.updatedAt) / 86400000;
+    if (days < CFG.PPT_DECAY_DAYS) return 1;
+    return Math.pow(CFG.PPT_DECAY_FACTOR, days - CFG.PPT_DECAY_DAYS);
+  }
 
   function _loadPatternStats() {
     try { const s = localStorage.getItem('cb_v100_pattern_stats'); if (s) patternStats = JSON.parse(s); } catch (_) {}
@@ -1058,28 +1119,37 @@
   }
   _loadPatternStats();
 
-  function recordPatternResult(patternCase, win) {
+  function recordPatternResult(patternCase, win, asset, tf) {
     if (!CFG.PPT_ENABLED || !patternCase) return;
-    if (!patternStats[patternCase]) patternStats[patternCase] = { wins: 0, losses: 0 };
-    win ? patternStats[patternCase].wins++ : patternStats[patternCase].losses++;
+    const key = _pptKey(patternCase, asset, tf);
+    if (!patternStats[key]) patternStats[key] = { wins: 0, losses: 0, updatedAt: Date.now() };
+    win ? patternStats[key].wins++ : patternStats[key].losses++;
+    patternStats[key].updatedAt = Date.now();
     _savePatternStats();
     _updatePPTDisplay();
   }
 
-  function getPatternWinRate(patternCase) {
-    if (!patternStats[patternCase]) return null;
-    const { wins, losses } = patternStats[patternCase];
+  function getPatternWinRate(patternCase, asset, tf) {
+    const key  = _pptKey(patternCase, asset, tf);
+    // prefer specific key, fall back to legacy flat key for older data
+    const entry = patternStats[key] || patternStats[patternCase];
+    if (!entry) return null;
+    const d = _pptDecayFactor(entry);
+    const wins = entry.wins * d, losses = entry.losses * d;
     const total = wins + losses;
     if (total === 0) return null;
     return wins / total;
   }
 
-  function getPatternConfBoost(patternCase) {
+  function getPatternConfBoost(patternCase, asset, tf) {
     if (!CFG.PPT_ENABLED || !patternCase) return 0;
-    const wr = getPatternWinRate(patternCase);
+    const wr = getPatternWinRate(patternCase, asset, tf);
     if (wr === null) return 0;
-    const { wins, losses } = patternStats[patternCase];
-    const total = wins + losses;
+    const key   = _pptKey(patternCase, asset, tf);
+    const entry = patternStats[key] || patternStats[patternCase];
+    if (!entry) return 0;
+    const d     = _pptDecayFactor(entry);
+    const total = (entry.wins + entry.losses) * d;
     if (total < CFG.PPT_MIN_TRADES) return 0;
     if (wr < CFG.PPT_LOW_WR_THRESHOLD)  return -1;
     if (wr > CFG.PPT_HIGH_WR_THRESHOLD) return  1;
@@ -1088,8 +1158,13 @@
 
   function getTopPatterns(n = 5) {
     return Object.entries(patternStats)
-      .filter(([, v]) => v.wins + v.losses >= CFG.PPT_MIN_TRADES)
-      .map(([k, v]) => ({ name: k, wr: v.wins / (v.wins + v.losses), total: v.wins + v.losses }))
+      .map(([k, v]) => {
+        const d = _pptDecayFactor(v);
+        const w = v.wins * d, l = v.losses * d, total = w + l;
+        const displayName = k.includes('::') ? k.split('::')[1] : k;
+        return { name: displayName, wr: total > 0 ? w / total : 0, total: Math.round(total) };
+      })
+      .filter(p => p.total >= CFG.PPT_MIN_TRADES)
       .sort((a, b) => b.wr - a.wr)
       .slice(0, n);
   }
@@ -1384,9 +1459,20 @@
   // ⚡ v10.2: MACD/BB/SRSI تُتجاهل بلا عقوبة عند نقص البيانات
   // ⚡ v10.2: العتبة تتكيف مع الفريم الزمني (3ث/5ث/15ث/60ث)
   function getAdaptiveThresholds(period) {
-    if (period > 0 && period <= 15) return { auto: CFG.CONF_SHORT_AUTO, min: CFG.CONF_SHORT_MIN };
-    if (period > 0 && period <= 60) return { auto: CFG.CONF_MED_AUTO,   min: CFG.CONF_MED_MIN };
-    return { auto: CFG.CONF_LONG_AUTO, min: CFG.CONF_LONG_MIN };
+    let base;
+    if (period > 0 && period <= 15) base = { auto: CFG.CONF_SHORT_AUTO, min: CFG.CONF_SHORT_MIN };
+    else if (period > 0 && period <= 60) base = { auto: CFG.CONF_MED_AUTO, min: CFG.CONF_MED_MIN };
+    else base = { auto: CFG.CONF_LONG_AUTO, min: CFG.CONF_LONG_MIN };
+
+    // v12.3 [ADAPTIVE CONF] raise bar when recent win-rate is below 55%
+    if (CFG.ADAPTIVE_CONF_ENABLED && _recentResults.length >= 10) {
+      const recentWR   = _recentResults.reduce((s, v) => s + v, 0) / _recentResults.length;
+      const excessLoss = Math.max(0, 0.55 - recentWR); // how far below 55% WR
+      const boost      = Math.min(CFG.ADAPTIVE_CONF_MAX_BOOST, excessLoss * CFG.ADAPTIVE_CONF_RISE_PER_LOSS * 100);
+      base.min  = Math.round((base.min  + boost) * 10) / 10;
+      base.auto = Math.round((base.auto + boost) * 10) / 10;
+    }
+    return base;
   }
 
   function scoreConfluence(signalDir, candles, tveResult) {
@@ -1540,8 +1626,8 @@
         if (r.signal==='SELL'&&(trendInfo.trend==='DOWN'||trendInfo.trend==='DN_WEAK')) r.confidence = Math.min(5,r.confidence+1);
         if (r.signal==='BUY' && trendInfo.trend==='DOWN') r.confidence = Math.max(1,r.confidence-2);
         if (r.signal==='SELL'&& trendInfo.trend==='UP')   r.confidence = Math.max(1,r.confidence-2);
-        // 🆕 PPT boost
-        r.confidence = Math.max(1, Math.min(5, r.confidence + getPatternConfBoost(r.case)));
+        // 🆕 PPT boost (v12.3: asset+tf aware)
+        r.confidence = Math.max(1, Math.min(5, r.confidence + getPatternConfBoost(r.case, activeAsset, candlePeriod)));
       }
       results.sort((a,b) => b.confidence-a.confidence);
       const best = results[0];
@@ -1653,8 +1739,11 @@
         updatePauseDisplay(true);
       }
     }
-    // 🆕 PPT
-    if (_lastTradePatternCase) { recordPatternResult(_lastTradePatternCase, win); _lastTradePatternCase = null; }
+    // 🆕 PPT v2 (asset+tf segregated)
+    if (_lastTradePatternCase) { recordPatternResult(_lastTradePatternCase, win, activeAsset, candlePeriod); _lastTradePatternCase = null; }
+    // v12.3 [ADAPTIVE CONF] track rolling results
+    _recentResults.push(win ? 1 : 0);
+    if (_recentResults.length > CFG.ADAPTIVE_CONF_WINDOW) _recentResults.shift();
 
     // SUPREME-PRED v2 adaptive learning — per-regime stats + algo weight updates
     (function _supremePredLearn(won) {
@@ -2846,6 +2935,38 @@
     return atr;
   }
 
+  // ── v12.3 [VOLATILITY] ATR + BB market-state classifier ─────────────────
+  function classifyVolatility(asset) {
+    const candles = candleBuffers[asset];
+    if (!candles || candles.length < CFG.ATR_PERIOD + 5) return 'NORMAL';
+    const atr = computeATR(candles, CFG.ATR_PERIOD);
+    if (!atr || atr <= 0) return 'NORMAL';
+
+    // maintain rolling ATR history for dynamic baseline
+    _atrHistory.push(atr);
+    if (_atrHistory.length > CFG.VOLATILITY_ATR_WINDOW) _atrHistory.shift();
+    if (_atrHistory.length < 5) return 'NORMAL';
+
+    const avgATR = _atrHistory.reduce((s, v) => s + v, 0) / _atrHistory.length;
+    const ratio  = atr / avgATR;
+
+    // BB width for squeeze confirmation (optional secondary signal)
+    let bbWidth = null;
+    if (candles.length >= CFG.BB_PERIOD && CFG.BB_ENABLED) {
+      const bb = computeBB(candles);
+      if (bb && bb.middle > 0) bbWidth = (bb.upper - bb.lower) / bb.middle;
+    }
+
+    if (ratio < CFG.VOLATILITY_SQUEEZE_MULT ||
+        (bbWidth !== null && bbWidth < CFG.VOLATILITY_BB_SQUEEZE)) {
+      return 'SQUEEZE';
+    }
+    if (ratio > CFG.VOLATILITY_EXPLOSIVE_MULT) {
+      return 'EXPLOSIVE';
+    }
+    return 'NORMAL';
+  }
+
   function updateTickSize(asset, newPrice) {
     const buf = tickBuffers[asset];
     if (!buf || buf.length < 2) return;
@@ -3218,6 +3339,21 @@
     if (_streamStalled) {
       addLog('⛔ [STREAM] التدفق متوقف — رفض الصفقة', 'error');
       return;
+    }
+
+    // حارس 0c: ✅ v12.3 [VOL-GATE] فلتر التقلب — يُحدَّث على كل صفقة
+    {
+      const _asset0c = direction ? (asset || activeAsset) : activeAsset;
+      if (_asset0c) _volatilityState = classifyVolatility(_asset0c);
+      _updateVolatilityHUD(_volatilityState);
+      if (_volatilityState === 'SQUEEZE') {
+        addLog('⛔ [VOL] سوق هادئ (SQUEEZE) — رفض الصفقة', 'info');
+        return;
+      }
+      if (_volatilityState === 'EXPLOSIVE' && (_PS.spConf ?? 0) < CFG.SUPREME_VOLATILE_THRESH) {
+        addLog('⛔ [VOL] سوق متقلب (EXPLOSIVE) — يشترط ثقة ≥' + CFG.SUPREME_VOLATILE_THRESH + '%', 'error');
+        return;
+      }
     }
 
     // حارس 1: وقف الخسائر
@@ -3698,6 +3834,14 @@
   .cb-pause-bar{display:none;align-items:center;justify-content:center;padding:5px 12px;background:rgba(255,55,85,0.06);border:1px solid rgba(255,55,85,0.12);margin:6px 12px 0;border-radius:8px;}
   .cb-pause-bar.active{display:flex;}
   .cb-pause-txt{font-size:9px;font-weight:700;color:#ff6070;}
+  /* v12.3 — volatility badge */
+  .cb-vol-bar{display:none;align-items:center;justify-content:center;gap:6px;padding:4px 12px;margin:4px 12px 0;border-radius:8px;font-size:9px;font-weight:700;}
+  .cb-vol-bar.squeeze{display:flex;background:rgba(100,150,255,0.08);border:1px solid rgba(100,150,255,0.2);color:#7eb4ff;}
+  .cb-vol-bar.explosive{display:flex;background:rgba(255,90,0,0.10);border:1px solid rgba(255,90,0,0.25);color:#ff7733;}
+  /* v12.3 — bad session banner */
+  .cb-bad-sess{display:none;align-items:center;justify-content:center;padding:7px 12px;margin:4px 12px 0;border-radius:8px;font-size:10px;font-weight:800;background:rgba(255,0,60,0.15);border:1px solid rgba(255,0,60,0.3);color:#ff4060;}
+  .cb-bad-sess.active{display:flex;animation:cbBadSessPulse 2s infinite;}
+  @keyframes cbBadSessPulse{0%,100%{opacity:1;}50%{opacity:0.65;}}
   .cb-stats-bar{display:flex;gap:6px;padding:8px 12px 0;}
   .cb-stt{flex:1;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.05);border-radius:10px;padding:5px 7px;text-align:center;}
   .cb-stt-lbl{display:block;font-size:7.5px;color:rgba(255,255,255,0.2);margin-bottom:2px;}
@@ -3867,11 +4011,23 @@
         <span class="cb-pause-txt" id="cbPauseTxt">⛔ وقف مؤقت بسبب الخسائر</span>
       </div>
 
+      <div class="cb-vol-bar" id="cbVolBar">
+        <span id="cbVolState">NORMAL</span>
+      </div>
+
+      <div class="cb-bad-sess" id="cbBadSession">
+        ⛔ جلسة سيئة — توقف عن التداول!
+      </div>
+
       <div class="cb-stats-bar">
         <div class="cb-stt"><span class="cb-stt-lbl">ربح ✅</span><span class="cb-stt-val g" id="cbWins">0</span></div>
         <div class="cb-stt"><span class="cb-stt-lbl">خسارة ❌</span><span class="cb-stt-val r" id="cbLosses">0</span></div>
         <div class="cb-stt"><span class="cb-stt-lbl">% الفوز</span><span class="cb-stt-val y" id="cbWinRate">–</span></div>
         <div class="cb-stt"><span class="cb-stt-lbl">🔥🔥 مزدوج</span><span class="cb-stt-val y" id="cbDoubles">0</span></div>
+      </div>
+      <div class="cb-stats-bar" style="padding-top:4px;">
+        <div class="cb-stt" style="flex:2;"><span class="cb-stt-lbl">نقطة التعادل (Breakeven)</span><span class="cb-stt-val y" id="cbBreakeven">–</span></div>
+        <div class="cb-stt" style="flex:1;"><span class="cb-stt-lbl">التقلب</span><span class="cb-stt-val y" id="cbVolMini">–</span></div>
       </div>
 
       <div class="cb-sig-wrap">
@@ -4119,12 +4275,49 @@
     }
   }
 
+  // v12.3 — volatility HUD updater (called from Guard 0c)
+  function _updateVolatilityHUD(state) {
+    const bar  = W.document.getElementById('cbVolBar');
+    const mini = W.document.getElementById('cbVolMini');
+    const lbl  = W.document.getElementById('cbVolState');
+    if (bar) {
+      bar.className = 'cb-vol-bar' + (state === 'SQUEEZE' ? ' squeeze' : state === 'EXPLOSIVE' ? ' explosive' : '');
+      if (lbl) lbl.textContent = state === 'SQUEEZE' ? '📉 SQUEEZE — هدوء' : state === 'EXPLOSIVE' ? '🌋 EXPLOSIVE — تقلب شديد' : 'NORMAL';
+    }
+    if (mini) {
+      mini.textContent = state === 'SQUEEZE' ? '📉' : state === 'EXPLOSIVE' ? '🌋' : '✅';
+      mini.className   = 'cb-stt-val ' + (state === 'NORMAL' ? 'g' : 'y');
+    }
+  }
+
+  // v12.3 — bad-session banner (shown when session WR < breakeven for ≥ BAD_SESSION_MIN_TRADES)
+  function _updateBadSessionHUD() {
+    const banner = W.document.getElementById('cbBadSession');
+    if (!banner) return;
+    const total = STATS.wins + STATS.losses;
+    if (total < CFG.BAD_SESSION_MIN_TRADES) { banner.classList.remove('active'); return; }
+    const liveP   = (typeof getActiveAssetPayout === 'function') ? getActiveAssetPayout() : null;
+    const payout  = (liveP !== null && liveP > 0) ? liveP : (_dynamicPayout ?? 0.85);
+    const breakeven = 1 / (1 + payout); // minimum WR to be profitable
+    const sessWR  = STATS.wins / total;
+    banner.classList.toggle('active', sessWR < breakeven + CFG.BAD_SESSION_WR_THRESH);
+  }
+
   function updateStatsUI() {
     const w=W.document.getElementById('cbWins'), l=W.document.getElementById('cbLosses'), r=W.document.getElementById('cbWinRate'), dbl=W.document.getElementById('cbDoubles');
     if (w) w.textContent=STATS.wins;
     if (l) l.textContent=STATS.losses;
     if (r) { r.textContent=winRate()+'%'; r.className='cb-stt-val '+(winRate()>=70?'g':winRate()>=55?'y':'r'); }
     if (dbl) dbl.textContent=(STATS.doubles||0);
+    // v12.3 — breakeven % display
+    const be = W.document.getElementById('cbBreakeven');
+    if (be) {
+      const liveP = (typeof getActiveAssetPayout === 'function') ? getActiveAssetPayout() : null;
+      const payout = (liveP !== null && liveP > 0) ? liveP : (_dynamicPayout ?? 0.85);
+      const beVal  = Math.round((1 / (1 + payout)) * 1000) / 10;
+      be.textContent = beVal + '%';
+    }
+    _updateBadSessionHUD();
     _updatePPTDisplay();
   }
 
@@ -5881,6 +6074,44 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // § 29.6  v12.3 — Mini-Backtest (startup forward-walk on buffered candles)
+  // ══════════════════════════════════════════════════════════════════════
+  function _runMiniBacktest() {
+    if (_miniBacktestDone) return;
+    _miniBacktestDone = true;
+    const asset   = activeAsset;
+    const candles = asset ? candleBuffers[asset] : null;
+    if (!candles || candles.length < CFG.MINI_BACKTEST_MIN_CANDLES) {
+      addLog('[BACKTEST] بيانات غير كافية للاختبار التاريخي', 'info');
+      return;
+    }
+    let wins = 0, losses = 0;
+    const N = candles.length;
+    // walk-forward: check candles[0..i-1] → predict → verify against candles[i]
+    for (let i = CFG.MIN_CANDLES_TO_TRADE; i < N - 1; i++) {
+      const slice  = candles.slice(0, i);
+      const result = checkStrategy(slice, null);
+      if (!result || !result.signal) continue;
+      const next   = candles[i];
+      const correct = (result.signal === 'BUY' && next.isBullish) ||
+                      (result.signal === 'SELL' && !next.isBullish);
+      correct ? wins++ : losses++;
+    }
+    const total = wins + losses;
+    if (total < 5) { addLog('[BACKTEST] عدد الإشارات التاريخية قليل جداً', 'info'); return; }
+    const wr = Math.round((wins / total) * 100);
+    const liveP  = (typeof getActiveAssetPayout === 'function') ? getActiveAssetPayout() : null;
+    const payout = (liveP !== null && liveP > 0) ? liveP : (_dynamicPayout ?? 0.85);
+    const be     = Math.round((1 / (1 + payout)) * 100);
+    const cls    = wr >= 60 ? 'signal' : wr >= be ? 'info' : 'error';
+    addLog(
+      '📊 [BACKTEST] ' + total + ' إشارة | فوز: ' + wins + ' (' + wr + '%) | خسارة: ' + losses +
+      ' | تعادل: ' + be + '% | ' + (wr >= be ? '✅ فوق نقطة التعادل' : '⚠️ تحت التعادل'),
+      cls
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
   // § 29.5  SUPREME-PRED v2 — Brain Persistence (localStorage)
   // ══════════════════════════════════════════════════════════════════════
   function _saveBrain() {
@@ -5926,7 +6157,9 @@
       initUI();
       _startSignalWatcher();
       _startStreamWatchdog();
-      addLog('⚡ V12.2_SUPREME | SUPREME-PRED v2 | 70% gate | 30 algos | IMDB ✓ | Watchers ✓ | Stream Guard ✓', 'signal');
+      // v12.3: mini-backtest runs 2s after boot (candleBuffers needs time to fill)
+      if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
+      addLog('⚡ V12.3_SUPREME | SUPREME-PRED v2 | VOL-GATE ✓ | PPT-Decay ✓ | AdaptiveConf ✓ | Backtest ✓', 'signal');
     };
 
     if (W.document.body) {
