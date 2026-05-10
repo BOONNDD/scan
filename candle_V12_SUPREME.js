@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.10)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.11)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.10.0
-// @description  V12.10: clickTradeButton full pointer+touch events + extended PO mobile selectors + diagnostic log
+// @version      12.11.0
+// @description  V12.11: IndexedDB persistent storage (trades/signals/logs/candles) + GitHub batch sync
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -462,6 +462,13 @@
     AI_DIRECT_MATCH_ONLY      : false,  // true = تداول فقط عندما يطابق أصل الإشارة الأصل النشط
     AI_DIRECT_MIN_TF_SECS     : 60,    // تجاهل فريمات أقل من 60 ثانية
     AI_DIRECT_COOLDOWN_MS     : 8000,  // 8 ثوانٍ حد أدنى بين صفقات AI المباشرة
+    // ─── § DB / GitHub ───────────────────────────────────────────────────────
+    GH_TOKEN             : '',                // GitHub PAT — يُقرأ من localStorage(_sb_gh_token) تلقائياً
+    GH_REPO              : 'boonndd/scan',    // owner/repo
+    GH_BRANCH            : 'data',            // فرع تخزين البيانات
+    GH_SYNC_INTERVAL_MS  : 300000,            // مزامنة كل 5 دقائق
+    DB_LOG_ENABLED       : true,              // حفظ السجل الكامل في IndexedDB
+    DB_TICK_ENABLED      : true,              // حفظ شموع OHLC في IndexedDB
   };
 
   // ══════════════════════════════════════════════════════════════════════
@@ -538,6 +545,8 @@
   // ── v12.8 [AI-DIRECT] Direct trader state ────────────────────────────────
   let _aiDirectLastTradeMs = 0;      // timestamp of last AI-direct trade
   let _aiDirectStats       = { trades: 0, wins: 0, losses: 0 }; // session stats
+  // ── v12.11 [DB] Pending trade record (set at open, completed at close) ────
+  let _pendingTradeRecord  = null;
   // ── v12.7 [SPY] raw WS#1/WS#2 entry store ────────────────────────────────
   const _spyEntries        = [];     // [{ts, src, evName, uid, payload, isAI}]
   let   _spyFilter         = 'all';  // current filter tab
@@ -2468,6 +2477,22 @@
       if (win) addLog('📊 [KELLY] نسبة العائد: ' + Math.round(rawPayout * 100) + '%', 'info');
     }
     recordTrade(win, _lastTradeWasTVE);
+    // v12.11 [DB] Persist complete trade record to IndexedDB
+    const _rec = _pendingTradeRecord || {};
+    _dbPut('trades', {
+      ..._rec,
+      closeTs:    Date.now(),
+      orderId:    _rec.orderId   || deal.id,
+      asset:      _rec.asset     || normalizeAsset(deal.asset || activeAsset || ''),
+      result:     win ? 'win' : 'loss',
+      profit:     deal.profit      ?? 0,
+      amount:     _rec.amount      || deal.amount || 0,
+      openPrice:  _rec.openPrice   || deal.openPrice  || 0,
+      closePrice: deal.closePrice  ?? 0,
+      payout:     deal.percentProfit != null ? deal.percentProfit / 100 : _dynamicPayout,
+    });
+    _pendingTradeRecord = null;
+    setTimeout(() => _githubSync(false), 0); // async GH sync after trade result
     const sym = win ? '✅' : '❌', amount = win ? '+'+deal.profit?.toFixed(2)+'$' : '-'+deal.amount+'$';
     addLog(sym+' '+amount+(_lastTradeWasTVE?' [TVE]':'')+(_lastTradeWasDouble?' 🔥🔥':'')+' | '+(deal.openPrice?.toFixed(5)||'')+'→'+(deal.closePrice?.toFixed(5)||''), win?'signal':'error');
     if (_lastTradeWasDouble && win) STATS.doubleWins = (STATS.doubleWins||0)+1;
@@ -2486,6 +2511,11 @@
   function onOpenOrderSuccess(data) {
     if (data.id) botOrderIds.add(data.id); lastOpenedOrder = data;
     addLog('📨 أُكِّد الأمر #'+data.id+' | '+(data.openPrice?.toFixed(5)||''), 'signal');
+    // v12.11 [DB] Update pending record with confirmed order details
+    if (_pendingTradeRecord) {
+      _pendingTradeRecord.orderId   = data.id;
+      _pendingTradeRecord.openPrice = data.openPrice ?? 0;
+    }
   }
 
   function onBalanceUpdate(data) {
@@ -2795,6 +2825,12 @@
     if (!candleBuffers[asset]) candleBuffers[asset] = [];
     candleBuffers[asset].push(candle);
     if (candleBuffers[asset].length > CFG.MAX_CANDLES) candleBuffers[asset].shift();
+    // v12.11 [DB] Persist OHLC candle to IndexedDB
+    if (CFG.DB_TICK_ENABLED) _dbPut('candles', {
+      asset, ts: candle.startTime || Date.now(), period: candlePeriod,
+      open: candle.open, high: candle.high, low: candle.low, close: candle.close,
+      ticks: candle.tickCount, isBullish: candle.isBullish,
+    });
     if (asset === activeAsset) {
       _candlesSinceAssetChange++;
       const bufs = candleBuffers[asset];
@@ -3718,6 +3754,14 @@
     _lastFailedSignal = lastSignal ? { ...lastSignal } : null;
     _lastTradeWasTVE  = _readySignal?.isTVE || false;
     updateTradeBtn();
+    // v12.11 [DB] Snapshot trade context — matched to result in processCloseOrder
+    _pendingTradeRecord = {
+      asset: a, direction, amount: overrideAmount || tradeAmount,
+      openTs: now, source: _lastTradeWasTVE ? 'tve' : 'supreme',
+      isTVE: _lastTradeWasTVE, confidence: _PS.spConf ?? 0,
+      pattern: _lastTradePatternCase || null, regime: _PS.snap?.regime ?? null,
+      candlePeriod, isDemo,
+    };
 
     // ✅ v10.8: سجّل الصفقة بكل تفاصيلها
     const _execTrend = analyzeTrend(candleBuffers[a] || []);
@@ -4150,6 +4194,8 @@
     if (badge) badge.textContent = _logSeq;
     // ── Android / Server bridge (optional — only active inside APK) ──────────
     try { W.__SUPREME_BRIDGE__?.log?.(msg, type); } catch(_) {}
+    // v12.11 [DB] Persist log entry to IndexedDB (fire-and-forget)
+    if (CFG.DB_LOG_ENABLED) _dbPut('logs', { seq: _logSeq, msg, type, extra: extra || '' });
   }
 
   const HUD_CSS = `
@@ -4475,6 +4521,12 @@
         <button class="cb-reset-btn" id="cbResetStats" style="margin:0;flex:1;">إعادة تعيين</button>
         <button class="cb-reset-btn" id="cbCopyStats"  style="margin:0;flex:1;border-color:rgba(100,150,255,0.2);color:rgba(100,150,255,0.6);">📋 نسخ</button>
       </div>
+      <div style="margin:0 12px 4px;font-size:9px;color:rgba(255,255,255,0.25);text-align:right;" id="cbDbStats">🗄 جاري تحميل إحصاءات قاعدة البيانات…</div>
+      <div style="display:flex;gap:6px;margin:0 12px 8px;align-items:center;">
+        <input type="password" id="cbGhToken" placeholder="ghp_... GitHub Token" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:rgba(255,255,255,0.55);font-size:10px;padding:4px 6px;outline:none;">
+        <button class="cb-reset-btn" id="cbGhSync" style="margin:0;flex:0 0 auto;border-color:rgba(0,180,100,0.25);color:rgba(0,210,100,0.5);">☁️ مزامنة</button>
+      </div>
+      <div style="margin:0 12px 6px;font-size:9px;color:rgba(0,210,100,0.4);text-align:right;" id="cbGhStatus">☁️ لم يتم المزامنة بعد</div>
     </div>
     <div id="cbStatus">v12.8 | AI-Direct: uid:3→تداول مباشر | IMDB: 70%→×2 | 85%→×3 | 94%→×4</div>
   </div>
@@ -5134,6 +5186,36 @@
         renderLog();
       });
     });
+
+    // v12.11 [DB] GitHub token input + manual sync button
+    const ghTokenInp = W.document.getElementById('cbGhToken');
+    const ghSyncBtn  = W.document.getElementById('cbGhSync');
+    const ghStatusEl = W.document.getElementById('cbGhStatus');
+    if (ghTokenInp) {
+      // Pre-fill from localStorage or CFG
+      const saved = W.localStorage.getItem('_sb_gh_token') || CFG.GH_TOKEN || '';
+      if (saved) { ghTokenInp.value = saved; ghTokenInp.placeholder = '✅ توكن محفوظ'; }
+      ghTokenInp.addEventListener('change', () => {
+        const tok = ghTokenInp.value.trim();
+        if (tok) { W.localStorage.setItem('_sb_gh_token', tok); CFG.GH_TOKEN = tok; addLog('🔑 [GH] تم حفظ التوكن', 'info'); }
+      });
+    }
+    if (ghSyncBtn) {
+      ghSyncBtn.addEventListener('click', () => {
+        if (ghTokenInp?.value?.trim()) CFG.GH_TOKEN = ghTokenInp.value.trim();
+        ghSyncBtn.textContent = '☁️ جاري…'; ghSyncBtn.disabled = true;
+        _githubSync(true).finally(() => { ghSyncBtn.textContent = '☁️ مزامنة'; ghSyncBtn.disabled = false; });
+      });
+    }
+    // Refresh DB stats every 30s
+    _dbUpdateStats();
+    _v11_setInterval(_dbUpdateStats, 30000);
+    // Periodic GitHub auto-sync
+    _v11_setInterval(() => _githubSync(false), CFG.GH_SYNC_INTERVAL_MS);
+    // Prune old records at startup
+    setTimeout(_dbPrune, 10000);
+    // Sync on page unload
+    W.addEventListener('beforeunload', () => _githubSync(true));
 
     _makeDraggable(panel, dragHdr);
     _makeDraggable(logFloat, W.document.getElementById('cbLogHdr'));
@@ -7073,6 +7155,16 @@
         (wsOk ? '' : ' 🖱fallback'),
         'signal'
       );
+      // v12.11 [DB] Save AI-Direct signal + set pending trade record
+      _dbPut('signals', {
+        asset: tradeAsset, direction: dir, source: 'ai-direct',
+        tfSecs: snapTime, sigPrice: sigPrice ?? 0, executed: true,
+      });
+      _pendingTradeRecord = {
+        asset: tradeAsset, direction: dir, amount, openTs: now,
+        source: 'ai-direct', isTVE: false,
+        tfSecs: snapTime, sigPrice: sigPrice ?? 0, isDemo,
+      };
     } else {
       addLog('❌ [AI-D] فشل التنفيذ — WS + زر', 'error');
     }
@@ -7171,6 +7263,148 @@
   // ══════════════════════════════════════════════════════════════════════
   // § 30  الإقلاع
   // ══════════════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════════════
+  // § DB  v12.11 — IndexedDB persistent storage + GitHub batch sync
+  // ══════════════════════════════════════════════════════════════════════
+  const _SESSION_ID = Date.now().toString(36);
+  let   _idb        = null;
+  const _IDB_NAME   = 'supremebot_v1';
+  const _IDB_VER    = 1;
+  const _IDB_STORES = ['trades', 'signals', 'logs', 'candles'];
+
+  function _idbOpen() {
+    if (_idb) return Promise.resolve(_idb);
+    return new Promise((resolve, reject) => {
+      const req = W.indexedDB.open(_IDB_NAME, _IDB_VER);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        for (const name of _IDB_STORES) {
+          if (db.objectStoreNames.contains(name)) continue;
+          const s = db.createObjectStore(name, { keyPath: 'id', autoIncrement: true });
+          s.createIndex('ts',      'ts',      { unique: false });
+          s.createIndex('session', 'session', { unique: false });
+          if (name !== 'logs') s.createIndex('asset', 'asset', { unique: false });
+        }
+      };
+      req.onsuccess = e => { _idb = e.target.result; resolve(_idb); };
+      req.onerror   = e => reject(e.target.error);
+    });
+  }
+
+  // Fire-and-forget DB write — never blocks the trading loop
+  function _dbPut(storeName, obj) {
+    _idbOpen().then(db => {
+      try {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).add({ ...obj, ts: obj.ts || Date.now(), session: _SESSION_ID });
+      } catch(_) {}
+    }).catch(() => {});
+  }
+
+  function _dbGetBySession(storeName, sid) {
+    return _idbOpen().then(db => new Promise(resolve => {
+      const idx = db.transaction(storeName, 'readonly').objectStore(storeName).index('session');
+      const req = idx.getAll(IDBKeyRange.only(sid || _SESSION_ID));
+      req.onsuccess = e => resolve(e.target.result || []);
+      req.onerror   = () => resolve([]);
+    })).catch(() => []);
+  }
+
+  function _dbGetAll(storeName) {
+    return _idbOpen().then(db => new Promise(resolve => {
+      const req = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+      req.onsuccess = e => resolve(e.target.result || []);
+      req.onerror   = () => resolve([]);
+    })).catch(() => []);
+  }
+
+  function _dbCount(storeName) {
+    return _idbOpen().then(db => new Promise(resolve => {
+      const req = db.transaction(storeName, 'readonly').objectStore(storeName).count();
+      req.onsuccess = e => resolve(e.target.result || 0);
+      req.onerror   = () => resolve(0);
+    })).catch(() => 0);
+  }
+
+  // Prune records older than 30 days to keep storage lean
+  function _dbPrune() {
+    const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+    _idbOpen().then(db => {
+      for (const name of _IDB_STORES) {
+        try {
+          const idx = db.transaction(name, 'readwrite').objectStore(name).index('ts');
+          const req = idx.openCursor(IDBKeyRange.upperBound(cutoff));
+          req.onsuccess = e => { const c = e.target.result; if (c) { c.delete(); c.continue(); } };
+        } catch(_) {}
+      }
+    }).catch(() => {});
+  }
+
+  // ── GitHub Sync ─────────────────────────────────────────────────────────────
+  let _ghLastSyncMs = 0;
+  let _ghSyncing    = false;
+
+  async function _githubSync(force) {
+    if (_ghSyncing) return;
+    // Read token from CFG or localStorage (user sets once via console)
+    const token = CFG.GH_TOKEN || W.localStorage.getItem('_sb_gh_token') || '';
+    if (!token) { if (force) addLog('⚠️ [GH] أضف التوكن: localStorage.setItem("_sb_gh_token","ghp_...")', 'error'); return; }
+    const now = Date.now();
+    if (!force && now - _ghLastSyncMs < CFG.GH_SYNC_INTERVAL_MS) return;
+    _ghSyncing = true; _ghLastSyncMs = now;
+    try {
+      const [trades, signals] = await Promise.all([
+        _dbGetBySession('trades'),
+        _dbGetBySession('signals'),
+      ]);
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const path    = 'data/sessions/' + dateStr + '/' + _SESSION_ID + '.json';
+      const payload = {
+        sessionId: _SESSION_ID, sessionDate: dateStr, exportedAt: new Date().toISOString(),
+        summary: {
+          trades: trades.length,
+          wins:   trades.filter(t => t.result === 'win').length,
+          losses: trades.filter(t => t.result === 'loss').length,
+          signals: signals.length, balance: accountBalance,
+          isDemo,
+        },
+        trades, signals,
+      };
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload, null, 2))));
+      let sha = '';
+      try {
+        const r = await fetch('https://api.github.com/repos/' + CFG.GH_REPO + '/contents/' + path, {
+          headers: { Authorization: 'token ' + token, Accept: 'application/vnd.github.v3+json' },
+        });
+        if (r.ok) sha = (await r.json()).sha || '';
+      } catch(_) {}
+      const body = { message: 'data: session ' + _SESSION_ID + ' @ ' + dateStr, content: b64, branch: CFG.GH_BRANCH };
+      if (sha) body.sha = sha;
+      const r2 = await fetch('https://api.github.com/repos/' + CFG.GH_REPO + '/contents/' + path, {
+        method: 'PUT',
+        headers: { Authorization: 'token ' + token, 'Content-Type': 'application/json', Accept: 'application/vnd.github.v3+json' },
+        body: JSON.stringify(body),
+      });
+      if (r2.ok) {
+        addLog('☁️ [GH] ✓ ' + trades.length + ' صفقة | ' + signals.length + ' إشارة → ' + path, 'signal');
+        const el = W.document.getElementById('cbGhStatus');
+        if (el) el.textContent = '☁️ ' + new Date().toLocaleTimeString('ar');
+      } else {
+        const err = await r2.json().catch(() => ({}));
+        addLog('⚠️ [GH] خطأ ' + r2.status + ': ' + (err.message || ''), 'error');
+      }
+    } catch(e) {
+      addLog('⚠️ [GH] فشل: ' + e.message, 'error');
+    } finally { _ghSyncing = false; }
+  }
+
+  // DB stats helper for HUD display
+  async function _dbUpdateStats() {
+    const [t, s, l, c] = await Promise.all(_IDB_STORES.map(n => _dbCount(n)));
+    const el = W.document.getElementById('cbDbStats');
+    if (el) el.textContent = '🗄 صفقات:' + t + ' | إشارات:' + s + ' | سجل:' + l + ' | شموع:' + c;
+  }
+
   function init() {
     // SUPREME-PRED v2: restore learned weights from localStorage before UI starts
     _loadBrain();
@@ -7191,7 +7425,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.9_SUPREME | AI-Direct✓ | tradeExecFix✓ | WS+Btn fallback', 'signal');
+      addLog('⚡ V12.11_SUPREME | IndexedDB✓ | GH-Sync✓ | BTN-pointer✓ | session:' + _SESSION_ID, 'signal');
     };
 
     if (W.document.body) {
