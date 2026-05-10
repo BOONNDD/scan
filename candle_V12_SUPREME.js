@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.12)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.13)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.12.0
-// @description  V12.12: auto-fix min/max amount on failopenOrder | clear orphan DB record on fail
+// @version      12.13.0
+// @description  V12.13: payout filter for AI-Direct | normalizeAsset strips # prefix | PPT tracks AI-Direct win-rate
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -462,6 +462,7 @@
     AI_DIRECT_MATCH_ONLY      : false,  // true = تداول فقط عندما يطابق أصل الإشارة الأصل النشط
     AI_DIRECT_MIN_TF_SECS     : 60,    // تجاهل فريمات أقل من 60 ثانية
     AI_DIRECT_COOLDOWN_MS     : 8000,  // 8 ثوانٍ حد أدنى بين صفقات AI المباشرة
+    AI_DIRECT_MIN_PAYOUT      : 0.75,  // تجاهل أصول عائدها < 75% (0 = لا فلتر)
     // ─── § DB / GitHub ───────────────────────────────────────────────────────
     GH_TOKEN             : '',                // GitHub PAT — يُقرأ من localStorage(_sb_gh_token) تلقائياً
     GH_REPO              : 'boonndd/scan',    // owner/repo
@@ -2546,7 +2547,7 @@
   // § 19  المعالجات الأساسية
   // ══════════════════════════════════════════════════════════════════════
   function normalizeAsset(str) {
-    return String(str).replace(/[/\\\-\s]/g,'').replace(/_?otc$/i, '_otc');
+    return String(str).replace(/^#/, '').replace(/[/\\\-\s]/g,'').replace(/_?otc$/i, '_otc');
 }
 
   function onActiveAsset(str, source) {
@@ -7129,8 +7130,18 @@
     // AI signals for different assets: if MATCH_ONLY=false, trade on signal asset;
     // if WS is down and signal asset ≠ activeAsset, fall back to button on activeAsset
     const wsOk       = tradeWSOrig && tradeWS && tradeWS.readyState === 1;
-    const tradeAsset = wsOk ? (symbol || activeAsset || '') : (activeAsset || '');
+    const rawAsset   = wsOk ? (symbol || activeAsset || '') : (activeAsset || '');
+    const tradeAsset = normalizeAsset(rawAsset);
     if (!tradeAsset) { addLog('❌ [AI-D] لا أصل نشط', 'error'); return; }
+
+    // Payout filter: skip if asset payout is known and below threshold
+    if (CFG.AI_DIRECT_MIN_PAYOUT > 0) {
+      const ap = _assetPayouts.get(tradeAsset) ?? null;
+      if (ap !== null && ap < CFG.AI_DIRECT_MIN_PAYOUT) {
+        addLog('⏭ [AI-D] عائد منخفض ' + (ap * 100).toFixed(0) + '% — تجاهل ' + tradeAsset, 'info');
+        return;
+      }
+    }
 
     const action = dir === 'BUY' ? 'call' : 'put';
 
@@ -7166,6 +7177,8 @@
         (wsOk ? '' : ' 🖱fallback'),
         'signal'
       );
+      // PPT tracking: record AI-Direct as a named pattern so win-rate is tracked
+      _lastTradePatternCase = 'AI-Direct';
       // v12.11 [DB] Save AI-Direct signal + set pending trade record
       _dbPut('signals', {
         asset: tradeAsset, direction: dir, source: 'ai-direct',
@@ -7175,6 +7188,7 @@
         asset: tradeAsset, direction: dir, amount, openTs: now,
         source: 'ai-direct', isTVE: false,
         tfSecs: snapTime, sigPrice: sigPrice ?? 0, isDemo,
+        pattern: 'AI-Direct',
       };
     } else {
       addLog('❌ [AI-D] فشل التنفيذ — WS + زر', 'error');
