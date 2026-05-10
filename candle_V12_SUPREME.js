@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.6)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.8)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.7.0
-// @description  V12.7: AI Signal Correlation Tracker | Full payload log | uid≤20 strategy discovery
+// @version      12.8.0
+// @description  V12.8: AI Signal Direct Trader | uid:3 signals → instant trade | bypass SUPREME filters
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -453,6 +453,15 @@
 
     // ─── 🆕 v12.4 [ISLAMIC] Islamic account guard ────────────────────
     ISLAMIC_DISABLE_IMDB      : true,  // تعطيل IMDB في الحسابات الإسلامية
+
+    // ─── 🆕 v12.8 [AI-DIRECT] Direct trading on PocketOption AI uid:3 signals ──
+    // uid:3 في غرفة "Signals" (room_id:224730975) يرسل إشارات منظمة عبر WS#1
+    // الإشارة: symbol + forecast (UP2/DOWN2) + timeframe (M2/M3/M5/M10/M15) + price
+    AI_DIRECT_ENABLED         : true,   // تفعيل التداول المباشر على إشارات uid:3
+    AI_DIRECT_AMOUNT          : 0,      // 0 = استخدم tradeAmount، أو مبلغ ثابت (مثال: 1)
+    AI_DIRECT_MATCH_ONLY      : false,  // true = تداول فقط عندما يطابق أصل الإشارة الأصل النشط
+    AI_DIRECT_MIN_TF_SECS     : 60,    // تجاهل فريمات أقل من 60 ثانية
+    AI_DIRECT_COOLDOWN_MS     : 8000,  // 8 ثوانٍ حد أدنى بين صفقات AI المباشرة
   };
 
   // ══════════════════════════════════════════════════════════════════════
@@ -526,6 +535,9 @@
   const _aiSignalLog       = [];     // array of {ts, uid, dir, asset, priceAt, ...}
   const _aiPendingChecks   = [];     // [{ts, dir, priceAt, check10, check30, check60}]
   let   _aiLogStats        = {w10:0, l10:0, w30:0, l30:0, w60:0, l60:0};
+  // ── v12.8 [AI-DIRECT] Direct trader state ────────────────────────────────
+  let _aiDirectLastTradeMs = 0;      // timestamp of last AI-direct trade
+  let _aiDirectStats       = { trades: 0, wins: 0, losses: 0 }; // session stats
   // ── v12.7 [SPY] raw WS#1/WS#2 entry store ────────────────────────────────
   const _spyEntries        = [];     // [{ts, src, evName, uid, payload, isAI}]
   let   _spyFilter         = 'all';  // current filter tab
@@ -2308,7 +2320,22 @@
             const isSystem = uid > 0 && uid <= 20;
             const sig = _classifyAIText(text, '');
             if (sig && isSystem) {
-              // Strong signal: platform AI account → record full payload + track correlation
+              // v12.8 [AI-DIRECT] uid:3 + structured signal → direct trade execution
+              // Confirmed payload: message_content.signal.{symbol, forecast, timeframe, price}
+              const structSig = msg?.message_content?.signal;
+              if (uid === 3 && structSig) {
+                const forecast = String(structSig.forecast || '');
+                const aiDir    = forecast.startsWith('UP')   ? 'BUY'
+                               : forecast.startsWith('DOWN') ? 'SELL' : null;
+                const tfStr    = String(structSig.timeframe || '');       // "M5" → 5 mins
+                const tfMins   = parseInt(tfStr.replace(/^M/i, ''), 10) || 0;
+                const tfSecs   = tfMins * 60;                             // 300 for M5
+                const rawSym   = String(structSig.symbol || '');          // "#MCD_otc" or "CITI_otc"
+                if (aiDir && tfSecs > 0) {
+                  _executeAISignalTrade(aiDir, rawSym, tfSecs, structSig.price);
+                }
+              }
+              // Always record + track correlation (logs full payload, schedules price checks)
               _applyAISignal(sig, 'AI-uid' + uid, uid, msg);
             } else if (sig && isChatWS) {
               // Community vote: increment tally for contrarian use
@@ -4338,12 +4365,17 @@
         <input type="checkbox" class="cb-toggle" id="cbAutoToggle">
         <span class="cb-auto-badge" id="cbAutoBadge">OFF</span>
       </div>
+      <div class="cb-auto-row" id="cbAIDirectRow">
+        <span class="cb-auto-lbl">🤖 AI مباشر (uid:3 إشارات)</span>
+        <input type="checkbox" class="cb-toggle" id="cbAIDirectToggle">
+        <span class="cb-auto-badge" id="cbAIDirectBadge">OFF</span>
+      </div>
       <div style="display:flex;gap:6px;margin:0 12px 8px;">
         <button class="cb-reset-btn" id="cbResetStats" style="margin:0;flex:1;">إعادة تعيين</button>
         <button class="cb-reset-btn" id="cbCopyStats"  style="margin:0;flex:1;border-color:rgba(100,150,255,0.2);color:rgba(100,150,255,0.6);">📋 نسخ</button>
       </div>
     </div>
-    <div id="cbStatus">v10.10 | IMDB: 70%→×2 | 85%→×3 | 94%→×4 | نفس الثانية</div>
+    <div id="cbStatus">v12.8 | AI-Direct: uid:3→تداول مباشر | IMDB: 70%→×2 | 85%→×3 | 94%→×4</div>
   </div>
   <div id="cbLogFloat">
     <div id="cbLogHdr">
@@ -4842,7 +4874,7 @@
       if (_isIslamicAccount) badges.push('🕌');
       if (_aiTradingMode)    badges.push('🤖');
       if (_platformId === 9) badges.push('📱');
-      titleEl.textContent = '⚡ V12.5 SUPREME' + (badges.length ? ' ' + badges.join('') : '');
+      titleEl.textContent = '⚡ V12.8 SUPREME' + (badges.length ? ' ' + badges.join('') : '');
     }
 
     // ✅ v10.4 FIX#5: بعد 3 ثوانٍ اجعل المقبس جاهزاً حتى لو لم يأتِ successauth
@@ -4862,6 +4894,19 @@
       addLog(autoTrade?'🤖 تداول تلقائي: مُفعَّل':'⏸ تداول تلقائي: متوقف','signal');
       if (autoTrade && fastCloseAt && fastCloseAt>Date.now()+100) schedulePredictiveEntry();
     });
+
+    // v12.8: AI-Direct toggle
+    const aiDToggle = W.document.getElementById('cbAIDirectToggle');
+    const aiDBadge  = W.document.getElementById('cbAIDirectBadge');
+    if (aiDToggle && aiDBadge) {
+      aiDToggle.checked       = CFG.AI_DIRECT_ENABLED;
+      aiDBadge.textContent    = CFG.AI_DIRECT_ENABLED ? 'ON' : 'OFF';
+      aiDToggle.addEventListener('change', () => {
+        CFG.AI_DIRECT_ENABLED = aiDToggle.checked;
+        aiDBadge.textContent  = CFG.AI_DIRECT_ENABLED ? 'ON' : 'OFF';
+        addLog(CFG.AI_DIRECT_ENABLED ? '🤖 AI-Direct: مُفعَّل' : '⏸ AI-Direct: متوقف', 'signal');
+      });
+    }
 
     // ✅ v10.9: إصلاح خانة المبلغ — 'input' + 'change' + حماية من Kelly
     const _applyAmount = () => {
@@ -6834,6 +6879,106 @@
     }
   }
 
+  // ── v12.8 [AI-DIRECT] Execute a trade directly from uid:3 structured signal ──
+  // Bypasses SUPREME-PRED (H5) and trend filter (H4); respects:
+  //   H0  sub-second bucket (no collision with regular trades)
+  //   H0b stream-stall guard
+  //   H1  loss-streak pause
+  //   H2  adaptive cooldown (via _aiDirectLastTradeMs + AI_DIRECT_COOLDOWN_MS)
+  //   H3  tradeExec (no collision with in-flight trade)
+  function _executeAISignalTrade(dir, symbol, tfSecs, sigPrice) {
+    if (!CFG.AI_DIRECT_ENABLED) return;
+    if (!autoTrade) return;
+
+    const now = Date.now();
+
+    // H0b: stream stall
+    if (_streamStalled) {
+      addLog('⛔ [AI-D] STREAM STALL — تجاهل إشارة ' + symbol, 'error');
+      return;
+    }
+
+    // H1: loss streak pause
+    if (_lossStreakPauseUntil > now) {
+      addLog('⛔ [AI-D] وقف تلقائي ' + Math.ceil((_lossStreakPauseUntil - now) / 1000) + 'ث — تجاهل', 'error');
+      return;
+    }
+
+    // H0: sub-second bucket collision with regular trades
+    const bucket = Math.floor(now / 50);
+    if (bucket === _subSecondBucket) return;
+
+    // H2: AI-direct specific cooldown
+    if (now - _aiDirectLastTradeMs < CFG.AI_DIRECT_COOLDOWN_MS) return;
+
+    // H3: tradeExec in-flight
+    if (tradeExec) {
+      addLog('⏭ [AI-D] tradeExec مشغول — ' + dir + ' ' + symbol, 'info');
+      return;
+    }
+
+    // Symbol filter: optionally restrict to active asset only
+    if (CFG.AI_DIRECT_MATCH_ONLY && symbol && symbol !== activeAsset) {
+      addLog('⏭ [AI-D] أصل مختلف: ' + symbol + ' ≠ ' + (activeAsset || '?') + ' — تجاهل', 'info');
+      return;
+    }
+
+    // Timeframe minimum
+    if (tfSecs < CFG.AI_DIRECT_MIN_TF_SECS) {
+      addLog('⏭ [AI-D] فريم قصير ' + tfSecs + 'ث — تجاهل', 'info');
+      return;
+    }
+
+    // Need live WS to trade
+    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) {
+      addLog('❌ [AI-D] مقبس التداول غير متصل', 'error');
+      return;
+    }
+
+    // Build packet with signal's own asset + timeframe
+    const amount     = CFG.AI_DIRECT_AMOUNT > 0 ? _safeAmount(CFG.AI_DIRECT_AMOUNT) : tradeAmount;
+    const snapTime   = snapToPOTime(tfSecs);
+    const tradeAsset = symbol || activeAsset || '';
+    const action     = dir === 'BUY' ? 'call' : 'put';
+    const reqId      = _nextReqId();
+    const packet     = '42["openOrder",{"asset":"' + tradeAsset + '","amount":' + amount +
+      ',"action":"' + action + '","isDemo":' + isDemo + ',"requestId":' + reqId +
+      ',"optionType":100,"time":' + snapTime + '}]';
+
+    // Commit trade state
+    _aiDirectLastTradeMs = now;
+    _subSecondBucket     = Math.floor(now / 50);
+    tradeExec = true; lastTradeMs = now;
+    updateTradeBtn();
+
+    try {
+      tradeWSOrig(packet);
+      _aiDirectStats.trades++;
+      const tfMin  = (snapTime / 60).toFixed(0);
+      const priceLbl = sigPrice ? ' سعر:' + sigPrice : '';
+      addLog(
+        '🤖 [AI-DIRECT] ' + (dir === 'BUY' ? '↑ شراء' : '↓ بيع') +
+        ' | ' + tradeAsset + ' | ' + tfMin + 'د | $' + amount + priceLbl,
+        'signal'
+      );
+    } catch (e) {
+      addLog('❌ [AI-D] خطأ إرسال: ' + e.message, 'error');
+    }
+
+    // Release tradeExec with adaptive lock (same as regular trades)
+    if (_tradeExecLockTimer)  { clearTimeout(_tradeExecLockTimer);  _tradeExecLockTimer  = null; }
+    if (_tradeExecResetTimer) { clearTimeout(_tradeExecResetTimer); _tradeExecResetTimer = null; }
+    _tradeExecLockTimer = setTimeout(() => {
+      _tradeExecLockTimer = null;
+      tradeExec = false; updateTradeBtn();
+      _tryFirePendingSignal();
+    }, getAdaptiveCooldown());
+    _tradeExecResetTimer = setTimeout(() => {
+      _tradeExecResetTimer = null;
+      if (tradeExec) { tradeExec = false; updateTradeBtn(); }
+    }, getAdaptiveExecTimeout());
+  }
+
   function _startAISignalMonitor() {
     if (_aiSignalObserver) return; // already running
 
@@ -6934,7 +7079,7 @@
       if (CFG.MINI_BACKTEST_ENABLED) setTimeout(_runMiniBacktest, 2000);
       // v12.4: retry AppData after 2s — some globals populate asynchronously
       if (!_appData) setTimeout(_readAppData, 2000);
-      addLog('⚡ V12.7_SUPREME | AI-Corr✓ | FullPayload✓ | WR-Tracker✓ | console: _dumpAISignals()', 'signal');
+      addLog('⚡ V12.8_SUPREME | AI-Direct✓ | uid3→trade | Corr✓ | console: _dumpAISignals()', 'signal');
     };
 
     if (W.document.body) {
