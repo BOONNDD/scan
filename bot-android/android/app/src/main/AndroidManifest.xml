@@ -17,7 +17,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SupremeBot"
         android:usesCleartextTraffic="true"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:networkSecurityConfig="@xml/network_security_config">
 
         <activity
             android:name=".MainActivity"
@@ -29,6 +30,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ExtensionManagerActivity"
+            android:exported="false"
+            android:label="Extensions" />
 
         <service
             android:name=".BotService"

@@ -8,34 +8,50 @@ import android.webkit.WebViewClient
 import org.json.JSONObject
 
 class BotWebViewClient(
-    private val onPageReady: () -> Unit
+    private val onPageReady: () -> Unit,
+    private val getExtensions: ((String) -> List<Pair<String, String>>)? = null,
+    val onUrlChanged: ((String) -> Unit)? = null
 ) : WebViewClient() {
 
     companion object {
         private const val TAG = "BotWebViewClient"
-        private const val POCKET_OPTION_HOST = "pocketoption.com"
     }
 
     var cachedScript: String? = null
     var scriptVersion: String? = null
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-        val host = request?.url?.host ?: return false
-        return !host.contains(POCKET_OPTION_HOST)
+        return false
     }
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        url?.let { onUrlChanged?.invoke(it) }
         Log.d(TAG, "Page started: $url")
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
         Log.i(TAG, "Page loaded: $url")
+        url?.let { onUrlChanged?.invoke(it) }
 
-        val script = cachedScript ?: return
-        injectScript(view, script)
-        onPageReady()
+        val script = cachedScript
+        if (script != null) {
+            injectScript(view, script)
+            onPageReady()
+        }
+
+        url?.let { pageUrl ->
+            getExtensions?.invoke(pageUrl)?.forEach { (extName, extScript) ->
+                val wrapped = """
+                    (function() {
+                        try { $extScript }
+                        catch(e) { console.error('[Ext:${extName}] ' + e.message); }
+                    })();
+                """.trimIndent()
+                view?.evaluateJavascript(wrapped, null)
+            }
+        }
     }
 
     fun injectScript(view: WebView?, script: String) {

@@ -37,6 +37,9 @@ class BotService : Service() {
 
     private val binder = LocalBinder()
     private lateinit var socketClient: BotSocketClient
+    private var _isConnected = false
+
+    fun isConnected(): Boolean = _isConnected
 
     var onStatusUpdate: ((status: String) -> Unit)? = null
     var onLogReceived: ((type: String, message: String) -> Unit)? = null
@@ -56,10 +59,12 @@ class BotService : Service() {
                 onScriptReloaded?.invoke(script, version)
             },
             onConnected = {
+                _isConnected = true
                 Log.i(TAG, "Connected to server")
                 updateNotification("Connected to server")
             },
             onDisconnected = {
+                _isConnected = false
                 Log.i(TAG, "Disconnected from server")
                 updateNotification("Disconnected — retrying...")
             }
