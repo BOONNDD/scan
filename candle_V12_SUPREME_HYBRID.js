@@ -4283,6 +4283,33 @@
   #cbSpyBtn{position:fixed;bottom:100px;right:8px;z-index:2147483646;padding:6px 12px;border-radius:20px;background:#fff;border:1px solid #D1E8DC;color:#1E3A2F;font-family:'IBM Plex Sans Arabic',-apple-system,sans-serif;font-size:9px;font-weight:700;cursor:pointer;touch-action:manipulation;display:none;align-items:center;gap:5px;box-shadow:0 2px 8px rgba(30,58,47,0.10);}
   #cbSpyBtn.visible{display:flex;}
   #cbSpyCount{background:#F0FDF4;color:#16A34A;border-radius:10px;padding:1px 6px;font-size:7.5px;min-width:16px;text-align:center;border:1px solid #86EFAC;}
+  /* ══ ANALYSIS PANEL ══ */
+  #cbAnalBtn{position:fixed;bottom:132px;right:8px;z-index:2147483646;padding:6px 12px;border-radius:20px;background:#1E3A2F;border:1px solid #2d5c45;color:#fff;font-family:'IBM Plex Sans Arabic',-apple-system,sans-serif;font-size:9px;font-weight:700;cursor:pointer;touch-action:manipulation;display:flex;align-items:center;gap:5px;box-shadow:0 2px 8px rgba(30,58,47,0.25);}
+  #cbAnalCount{background:rgba(255,255,255,0.2);color:#fff;border-radius:10px;padding:1px 6px;font-size:7.5px;min-width:16px;text-align:center;}
+  #cbAnalPanel{position:fixed;bottom:80px;right:8px;width:380px;max-width:calc(100vw - 16px);max-height:calc(100svh - 100px);background:#fff;border:1.5px solid #D1E8DC;border-radius:16px;box-shadow:0 8px 32px rgba(30,58,47,0.15);display:none;flex-direction:column;overflow:hidden;z-index:2147483645;touch-action:none;direction:rtl;}
+  #cbAnalPanel.open{display:flex;}
+  @media(max-width:480px){#cbAnalPanel{width:calc(100vw - 16px);right:8px;}}
+  #cbAnalHdr{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:#1E3A2F;gap:6px;flex-shrink:0;}
+  .cb-anal-title{color:#fff;font-size:10px;font-weight:700;flex:1;}
+  .cb-anal-hdr-btns{display:flex;gap:4px;}
+  .cb-anal-hbtn{background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);color:#fff;border-radius:6px;padding:3px 7px;font-size:8px;cursor:pointer;white-space:nowrap;font-family:inherit;}
+  .cb-anal-hbtn:hover{background:rgba(255,255,255,0.28);}
+  .cb-anal-hbtn.ok{background:#16A34A;border-color:#16A34A;}
+  #cbAnalSummary{padding:8px 10px;background:#F0FDF4;border-bottom:1px solid #D1FAE5;font-size:9px;color:#065F46;font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;line-height:1.6;}
+  .cb-anal-tabs{display:flex;gap:0;border-bottom:1px solid #E5DDD5;flex-shrink:0;background:#F8F5F0;}
+  .cb-anal-tab{flex:1;padding:6px 4px;font-size:9px;font-weight:600;border:none;background:transparent;color:#6B7280;cursor:pointer;border-bottom:2px solid transparent;font-family:inherit;}
+  .cb-anal-tab.active{color:#1E3A2F;border-bottom-color:#1E3A2F;background:#fff;}
+  #cbAnalBody{flex:1;overflow-y:auto;font-size:8px;font-family:'SF Mono',ui-monospace,monospace;}
+  .cb-anal-table{width:100%;border-collapse:collapse;}
+  .cb-anal-table th{position:sticky;top:0;background:#F8F5F0;color:#374151;font-size:7.5px;font-weight:700;padding:4px 5px;border-bottom:1px solid #E5DDD5;text-align:center;white-space:nowrap;}
+  .cb-anal-table td{padding:4px 5px;border-bottom:1px solid #F3EEE8;color:#374151;text-align:center;white-space:nowrap;cursor:pointer;}
+  .cb-anal-table tr:hover td{background:#F0FDF4;}
+  .cb-anal-table tr.win td{background:#F0FDF4;}
+  .cb-anal-table tr.loss td{background:#FFF1F2;}
+  .cb-anal-table td.up{color:#16A34A;font-weight:700;}
+  .cb-anal-table td.dn{color:#DC2626;font-weight:700;}
+  .cb-anal-table td.adj{color:#D97706;font-weight:700;}
+  .cb-anal-empty{padding:20px;text-align:center;color:#9CA3AF;font-size:9px;}
   `;
 
   const HUD_HTML = `
@@ -4477,6 +4504,27 @@
     <div id="cbSpyScroll"></div>
     <div id="cbSpyStats">إدخالات: 0 | AI: 0 | WR-10s: – | WR-30s: –</div>
   </div>
+
+  <!-- ═══ HYBRID ANALYSIS PANEL ═══ -->
+  <button id="cbAnalBtn">📊 تحليل <span id="cbAnalCount">0</span></button>
+  <div id="cbAnalPanel">
+    <div id="cbAnalHdr">
+      <span class="cb-anal-title">📊 تحليل ETC — سجل الصفقات التفصيلي</span>
+      <div class="cb-anal-hdr-btns">
+        <button class="cb-anal-hbtn" id="cbAnalExport">📤 تصدير JSON</button>
+        <button class="cb-anal-hbtn" id="cbAnalExportTxt">📋 تصدير نص</button>
+        <button class="cb-anal-hbtn" id="cbAnalClear">🗑 مسح</button>
+        <button class="cb-anal-hbtn" id="cbAnalClose">✕</button>
+      </div>
+    </div>
+    <div id="cbAnalSummary"></div>
+    <div class="cb-anal-tabs">
+      <button class="cb-anal-tab active" data-t="etc">⚡ ETC (${ETC_MAX_HIST})</button>
+      <button class="cb-anal-tab" data-t="log">📋 سجل الصفقات</button>
+      <button class="cb-anal-tab" data-t="pat">🏆 الأنماط</button>
+    </div>
+    <div id="cbAnalBody"></div>
+  </div>
   `;
 
   // ══════════════════════════════════════════════════════════════════════
@@ -4634,6 +4682,257 @@
     spyHdr?.addEventListener('pointerdown', e => { _dragging=true; _dx=e.clientX-spyPanel.getBoundingClientRect().left; _dy=e.clientY-spyPanel.getBoundingClientRect().top; spyHdr.setPointerCapture(e.pointerId); });
     spyHdr?.addEventListener('pointermove', e => { if(!_dragging) return; spyPanel.style.right='auto'; spyPanel.style.bottom='auto'; spyPanel.style.left=(e.clientX-_dx)+'px'; spyPanel.style.top=(e.clientY-_dy)+'px'; });
     spyHdr?.addEventListener('pointerup', () => _dragging=false);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § HYBRID — Analysis Panel (ETC Journal + Export)
+  // ══════════════════════════════════════════════════════════════════════
+  let _analCurrentTab = 'etc';
+  // سجل الصفقات المفصّل — يملأ كل بيانات الصفقة من DB + ETC
+  const _tradeJournal = []; // [{ts, time, asset, dir, amount, result, profit, openPrice, closePrice, pattern, conf, delay, slippage, etcAdj, etcOffsetAfter}]
+
+  function _analAddTrade(rec) {
+    _tradeJournal.push(rec);
+    if (_tradeJournal.length > 200) _tradeJournal.shift();
+    const badge = W.document.getElementById('cbAnalCount');
+    if (badge) badge.textContent = _tradeJournal.length;
+  }
+
+  function _analSummaryHtml() {
+    const total = STATS.wins + STATS.losses;
+    const wr    = total > 0 ? ((STATS.wins / total) * 100).toFixed(1) : '–';
+    const etcAvgDelay = _etcHistory.length
+      ? (_etcHistory.reduce((s,r) => s + r.delay, 0) / _etcHistory.length).toFixed(1)
+      : '–';
+    const etcLosses = _etcHistory.filter(r => !r.win).length;
+    const etcWins   = _etcHistory.filter(r => r.win).length;
+    return [
+      `فوز: <b>${STATS.wins}</b> | خسارة: <b>${STATS.losses}</b> | معدل: <b>${wr}%</b>`,
+      `ETC offset: <b>${_etcOffset.toFixed(0)}ms</b> | متوسط تأخير: <b>${etcAvgDelay}ms</b> | معايرات: <b>${_etcHistory.filter(r=>r.adj>0).length}</b>`,
+      `ETC wins: <b>${etcWins}</b> | ETC losses: <b>${etcLosses}</b>`,
+    ].join('<br>');
+  }
+
+  function _analRenderEtcTab() {
+    if (_etcHistory.length === 0) return '<div class="cb-anal-empty">لا توجد صفقات بعد — انتظر أول صفقة</div>';
+    let cumulOffset = 0;
+    const rows = _etcHistory.slice().reverse().map(r => {
+      cumulOffset = 0; // نعيد حساب التراكمي
+      const t = new Date(r.ts).toLocaleTimeString('ar');
+      const winCls = r.win ? 'win' : 'loss';
+      const resCls = r.win ? 'up' : 'dn';
+      const adjCls = r.adj > 0 ? 'adj' : '';
+      const slip   = r.slippage !== null && r.slippage !== undefined ? r.slippage.toFixed(1) + 'p' : '–';
+      return `<tr class="${winCls}">
+        <td>${t}</td>
+        <td class="${resCls}">${r.win ? '✅ WIN' : '❌ LOSS'}</td>
+        <td>${r.delay}ms</td>
+        <td>${slip}</td>
+        <td>${r.conf}%</td>
+        <td class="${adjCls}">${r.adj > 0 ? '+' + r.adj : r.adj < 0 ? r.adj : '–'}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="cb-anal-table">
+      <thead><tr>
+        <th>الوقت</th><th>النتيجة</th><th>تأخير</th><th>انزلاق</th><th>ثقة</th><th>تعديل</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function _analRenderLogTab() {
+    // آخر 60 صفقة من logLines (نوع signal/error)
+    const trades = logLines.filter(l => l.type === 'signal' || (l.type === 'error' && l.msg.includes('❌')));
+    if (trades.length === 0) return '<div class="cb-anal-empty">لا توجد صفقات في السجل بعد</div>';
+    const rows = trades.slice(0, 60).map(l => {
+      const isWin  = l.msg.includes('✅');
+      const isFail = l.msg.includes('❌');
+      const cls    = isWin ? 'win' : isFail ? 'loss' : '';
+      const resCls = isWin ? 'up' : isFail ? 'dn' : '';
+      const seq    = String(l.seq).padStart(4,'0');
+      const msg    = l.msg.length > 60 ? l.msg.slice(0,60) + '…' : l.msg;
+      return `<tr class="${cls}" title="${l.msg}" onclick="_analCopyRow(this,'${l.msg.replace(/'/g,"\\'")}')">
+        <td>#${seq}</td>
+        <td>${l.t}</td>
+        <td class="${resCls}" style="text-align:right;max-width:220px;overflow:hidden;text-overflow:ellipsis;">${msg}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="cb-anal-table">
+      <thead><tr><th>#</th><th>الوقت</th><th style="text-align:right">الحدث</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function _analRenderPatTab() {
+    const pats = getTopPatterns(20);
+    if (pats.length === 0) return '<div class="cb-anal-empty">لا يوجد بيانات أنماط بعد</div>';
+    const rows = pats.map(p => {
+      const wr   = (p.wr * 100).toFixed(1);
+      const cls  = p.wr >= 0.56 ? 'win' : p.wr >= 0.50 ? '' : 'loss';
+      const vCls = p.wr >= 0.56 ? 'up' : p.wr < 0.50 ? 'dn' : '';
+      return `<tr class="${cls}">
+        <td style="text-align:right;max-width:140px;overflow:hidden;text-overflow:ellipsis;">${p.name}</td>
+        <td class="${vCls}">${wr}%</td>
+        <td>${p.wins}</td>
+        <td>${p.total - p.wins}</td>
+        <td>${p.total}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="cb-anal-table">
+      <thead><tr><th style="text-align:right">النمط</th><th>WR%</th><th>فوز</th><th>خسارة</th><th>مجموع</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function _analRender() {
+    const sum  = W.document.getElementById('cbAnalSummary');
+    const body = W.document.getElementById('cbAnalBody');
+    if (sum)  sum.innerHTML  = _analSummaryHtml();
+    if (!body) return;
+    if (_analCurrentTab === 'etc') body.innerHTML = _analRenderEtcTab();
+    else if (_analCurrentTab === 'log') body.innerHTML = _analRenderLogTab();
+    else if (_analCurrentTab === 'pat') body.innerHTML = _analRenderPatTab();
+  }
+
+  // دالة مساعدة لنسخ صف عند الضغط عليه
+  W._analCopyRow = function(el, text) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    const orig = el.style.background;
+    el.style.background = '#D1FAE5';
+    setTimeout(() => { el.style.background = orig; }, 600);
+  };
+
+  function _analExportJSON() {
+    const payload = {
+      exportedAt:  new Date().toISOString(),
+      session: {
+        asset: activeAsset, period: candlePeriod, isDemo,
+        wins: STATS.wins, losses: STATS.losses,
+        winRate: (STATS.wins + STATS.losses > 0
+          ? ((STATS.wins / (STATS.wins + STATS.losses)) * 100).toFixed(2)
+          : null),
+      },
+      etc: {
+        currentOffset: _etcOffset,
+        calibrations: _etcHistory.length,
+        history: _etcHistory,
+      },
+      patterns: getTopPatterns(30).map(p => ({
+        name: p.name, wr: +(p.wr * 100).toFixed(1),
+        wins: p.wins, total: p.total,
+      })),
+      tradeLog: logLines
+        .filter(l => l.type === 'signal' || (l.type === 'error' && l.msg.includes('❌')))
+        .slice(0, 200)
+        .map(l => ({ seq: l.seq, t: l.t, msg: l.msg, type: l.type })),
+    };
+    return JSON.stringify(payload, null, 2);
+  }
+
+  function _analExportText() {
+    const wr = (STATS.wins + STATS.losses > 0
+      ? ((STATS.wins / (STATS.wins + STATS.losses)) * 100).toFixed(1)
+      : '–');
+    const lines = [
+      '══════════════════════════════════════════════════',
+      '  HYBRID Analysis Export — ' + new Date().toLocaleString('ar'),
+      '══════════════════════════════════════════════════',
+      '',
+      '【 ملخص الجلسة 】',
+      '  الزوج  : ' + (activeAsset || '–'),
+      '  الفريم : ' + (candlePeriod ? fmtDur(candlePeriod) : '؟'),
+      '  فوز    : ' + STATS.wins + ' | خسارة: ' + STATS.losses + ' | WR: ' + wr + '%',
+      '  الحساب : ' + (isDemo ? 'ديمو' : '⚠️ حقيقي'),
+      '',
+      '【 ETC — معايرة التوقيت 】',
+      '  offset الحالي  : ' + _etcOffset.toFixed(0) + 'ms',
+      '  عدد المعايرات  : ' + _etcHistory.filter(r => r.adj > 0).length,
+      '  متوسط التأخير  : ' + (_etcHistory.length
+        ? (_etcHistory.reduce((s,r) => s + r.delay, 0) / _etcHistory.length).toFixed(1) + 'ms'
+        : '–'),
+      '',
+      '  الوقت         | نتيجة | تأخير  | انزلاق | ثقة  | تعديل',
+      '  ' + '─'.repeat(56),
+      ..._etcHistory.slice(-20).reverse().map(r => {
+        const t   = new Date(r.ts).toLocaleTimeString('ar');
+        const res = r.win ? 'WIN ✅ ' : 'LOSS❌';
+        const adj = r.adj > 0 ? '+' + r.adj : r.adj < 0 ? String(r.adj) : '  0 ';
+        const slip = r.slippage !== null && r.slippage !== undefined ? r.slippage.toFixed(1) + 'p' : '  – ';
+        return `  ${t.padEnd(13)} | ${res} | ${String(r.delay+'ms').padStart(6)} | ${slip.padStart(6)} | ${String(r.conf+'%').padStart(4)} | ${adj}ms`;
+      }),
+      '',
+      '【 أفضل / أسوأ الأنماط 】',
+      ...getTopPatterns(10).map(p =>
+        `  ${p.name.padEnd(24)} WR:${(p.wr*100).toFixed(1).padStart(5)}%  (${p.wins}/${p.total})`
+      ),
+      '',
+      '【 آخر 30 صفقة من السجل 】',
+      ...logLines
+        .filter(l => l.type === 'signal' || (l.type === 'error' && l.msg.includes('❌')))
+        .slice(0, 30)
+        .map(l => `  [${l.t}] ${l.msg}`),
+      '',
+      '══════════════════════════════════════════════════',
+    ];
+    return lines.join('\n');
+  }
+
+  function _initAnalPanel() {
+    const btn    = W.document.getElementById('cbAnalBtn');
+    const panel  = W.document.getElementById('cbAnalPanel');
+    const closeB = W.document.getElementById('cbAnalClose');
+    const expJ   = W.document.getElementById('cbAnalExport');
+    const expT   = W.document.getElementById('cbAnalExportTxt');
+    const clrBtn = W.document.getElementById('cbAnalClear');
+    if (!btn || !panel) return;
+
+    btn.addEventListener('click', () => {
+      panel.classList.toggle('open');
+      if (panel.classList.contains('open')) _analRender();
+    });
+    closeB?.addEventListener('click', () => panel.classList.remove('open'));
+
+    // تبويبات
+    panel.querySelectorAll('.cb-anal-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        panel.querySelectorAll('.cb-anal-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        _analCurrentTab = tab.dataset.t;
+        _analRender();
+      });
+    });
+
+    // تصدير JSON
+    expJ?.addEventListener('click', () => {
+      const json = _analExportJSON();
+      navigator.clipboard.writeText(json)
+        .then(() => { expJ.textContent = '✅ تم النسخ'; expJ.classList.add('ok'); setTimeout(() => { expJ.textContent = '📤 تصدير JSON'; expJ.classList.remove('ok'); }, 2500); })
+        .catch(() => { expJ.textContent = '❌ خطأ'; setTimeout(() => { expJ.textContent = '📤 تصدير JSON'; }, 2000); });
+    });
+
+    // تصدير نص
+    expT?.addEventListener('click', () => {
+      const txt = _analExportText();
+      navigator.clipboard.writeText(txt)
+        .then(() => { expT.textContent = '✅ تم النسخ'; expT.classList.add('ok'); setTimeout(() => { expT.textContent = '📋 تصدير نص'; expT.classList.remove('ok'); }, 2500); })
+        .catch(() => { expT.textContent = '❌ خطأ'; setTimeout(() => { expT.textContent = '📋 تصدير نص'; }, 2000); });
+    });
+
+    // مسح سجل ETC
+    clrBtn?.addEventListener('click', () => {
+      _etcHistory.length = 0;
+      _etcOffset = 0;
+      const el = W.document.getElementById('cbEtcOffset');
+      const bd = W.document.getElementById('cbEtcBadge');
+      if (el) el.textContent = '0ms';
+      if (bd) { bd.textContent = '0 معايرة'; bd.style.background = '#6b7280'; }
+      _analRender();
+    });
+
+    // تحديث تلقائي كل 5 ثوانٍ إذا مفتوح
+    setInterval(() => {
+      if (panel.classList.contains('open')) _analRender();
+    }, 5000);
   }
 
   // ─── دوال تحديث الواجهة ─────────────────────────────────────────────
@@ -5035,6 +5334,8 @@
     if (logClose&&logFloat)  logClose.addEventListener('click',  ()=>logFloat.classList.remove('open'));
     // v12.7: init SPY panel
     _initSpyPanel();
+    // HYBRID: init Analysis panel
+    _initAnalPanel();
 
     // ✅ v10.8: زر نسخ السجل الكامل
     const logCopyBtn = W.document.getElementById('cbLogCopy');
