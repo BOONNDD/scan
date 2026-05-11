@@ -2,6 +2,13 @@
 """
 PO WebSocket Trade Tester — Termux/Android
 يشغّل من Termux مباشرة على الجهاز بنفس IP المتصفح
+
+تحديث الكوكيز التلقائي:
+  1. افتح المتصفح → سجّل دخولك على pocketoption
+  2. افتح إضافة Cookie Extractor → تبويب cURL/WS
+  3. انسخ "Cookie String" كاملاً
+  4. الصقه في ملف cookies.txt (نفس مجلد هذا السكريبت)
+  5. أعد تشغيل السكريبت — يقرأ الكوكيز تلقائياً
 """
 
 import websocket
@@ -9,15 +16,71 @@ import threading
 import time
 import json
 import sys
+import os
+import urllib.parse
 
 # ══════════════════════════════════════════════
-#  ضع الكوكيز هنا (من إضافة Cookie Extractor)
+#  قراءة الكوكيز من cookies.txt أو القيمة الافتراضية
 # ══════════════════════════════════════════════
-COOKIE = (
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
+DEFAULT_COOKIE = (
     "ci_session=a%3A4%3A%7Bs%3A10%3A%22session_id%22%3Bs%3A32%3A%224e06a9b6d8f0bb29e68ee1f1a78f0358%22%3Bs%3A10%3A%22ip_address%22%3Bs%3A11%3A%222.90.205.17%22%3Bs%3A10%3A%22user_agent%22%3Bs%3A111%3A%22Mozilla%2F5.0%20%28Linux%3B%20Android%2010%3B%20K%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F137.0.0.0%20Mobile%20Safari%2F537.36%22%3Bs%3A13%3A%22last_activity%22%3Bi%3A1778444647%3B%7D91f353dff223a49580d7e78d2e8c687b; "
     "autologin=a%3A2%3A%7Bs%3A6%3A%22key_id%22%3Bs%3A16%3A%229adbd57bae4b6f76%22%3Bs%3A7%3A%22user_id%22%3Bs%3A9%3A%22130784309%22%3B%7D; "
     "loggedIn=1; po_uuid=68fa4533-2076-40cf-b7cd-e3cd9021d9ae; lang=en"
 )
+
+def load_cookie():
+    """قراءة الكوكيز من cookies.txt إن وُجد، وإلا استخدام القيمة الافتراضية."""
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+            cookie = f.read().strip()
+        if cookie:
+            print(f"  ✓ قُرئت الكوكيز من: {COOKIE_FILE}")
+            return cookie
+        else:
+            print(f"  ⚠ cookies.txt فارغ — سيُستخدم الكوكي الافتراضي")
+    else:
+        print(f"  ℹ لا يوجد cookies.txt — سيُستخدم الكوكي الافتراضي")
+        print(f"    لتحديث الكوكيز: أنشئ الملف {COOKIE_FILE}")
+        print(f"    والصق فيه Cookie String من إضافة Cookie Extractor")
+    return DEFAULT_COOKIE
+
+def parse_ci_session_age(cookie_str):
+    """استخراج last_activity من ci_session وحساب عمر الجلسة."""
+    try:
+        for part in cookie_str.split(";"):
+            part = part.strip()
+            if part.startswith("ci_session="):
+                raw = part[len("ci_session="):]
+                decoded = urllib.parse.unquote(raw)
+                # PHP serialize: s:13:"last_activity";i:<timestamp>;
+                marker = 's:13:"last_activity";i:'
+                idx = decoded.find(marker)
+                if idx == -1:
+                    return None, None
+                idx += len(marker)
+                end = decoded.find(";", idx)
+                ts = int(decoded[idx:end])
+                age_sec = int(time.time()) - ts
+                return ts, age_sec
+    except Exception:
+        pass
+    return None, None
+
+COOKIE = load_cookie()
+
+# فحص عمر الجلسة
+_ts, _age = parse_ci_session_age(COOKIE)
+if _age is not None:
+    _age_min = _age // 60
+    if _age < 0:
+        print(f"  ⚠ تحذير: last_activity في المستقبل ({-_age}ث) — تحقق من ساعة الجهاز")
+    elif _age > 1800:
+        print(f"  ⚠ تحذير: الجلسة قديمة ({_age_min} دقيقة) — قد ترفضها السيرفر")
+        print(f"    الحل: افتح المتصفح → pocketoption → أعد تصدير الكوكيز إلى cookies.txt")
+    else:
+        print(f"  ✓ عمر الجلسة: {_age_min} دقيقة — جلسة طازجة")
 
 # ══════════════════════════════════════════════
 #  إعدادات الصفقة
