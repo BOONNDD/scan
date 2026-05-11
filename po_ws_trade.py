@@ -68,11 +68,13 @@ def send_trade(ws):
     state["trade_sent"] = True
 
 def on_open(ws):
-    print(f"[{ts()}] ✓ WebSocket متصل")
-    print(f"[{ts()}] → إرسال 40 (Socket.IO connect)")
-    ws.send("40")
+    print(f"[{ts()}] ✓ WebSocket متصل — انتظار EIO handshake…")
 
 def on_message(ws, msg):
+    # Decode bytes → str
+    if isinstance(msg, (bytes, bytearray)):
+        msg = msg.decode('utf-8', errors='ignore')
+
     # EIO ping → pong
     if msg == "2":
         ws.send("3")
@@ -80,13 +82,20 @@ def on_message(ws, msg):
 
     print(f"[{ts()}] ← {msg[:200]}")
 
-    # Socket.IO handshake
-    if msg.startswith("0{"):
+    # EIO handshake → الآن أرسل Socket.IO connect
+    if msg.startswith("0{") or msg.startswith("0"):
         try:
             data = json.loads(msg[1:])
             print(f"[{ts()}] ✓ EIO handshake — sid={data.get('sid','?')[:16]}…")
         except:
             pass
+        print(f"[{ts()}] → إرسال 40 (Socket.IO connect)")
+        ws.send("40")
+        return
+
+    # Socket.IO connected confirmation
+    if msg == "40" or msg.startswith("40{"):
+        print(f"[{ts()}] ✓ Socket.IO متصل — في انتظار successauth…")
         return
 
     # Parse 42[event, data]
