@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.14)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.15)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.14.0
-// @description  V12.14: fix PO_VALID_TIMES add 1,2,3 (quick-mode) | fix AI-Direct WS asset name keeps hyphens/# intact
+// @version      12.15.0
+// @description  V12.15: _tradeDuration tracks user-selected trade expiry from platform (any duration, not hardcoded)
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -497,7 +497,8 @@
   // § 2  الحالة العامة
   // ══════════════════════════════════════════════════════════════════════
   let activeAsset     = null;
-  let candlePeriod    = 0;
+  let candlePeriod    = 0;   // chart candle period in seconds — for analysis only
+  let _tradeDuration  = 0;   // trade expiry selected by user in platform UI (seconds) — for openOrder time
   let durSource       = 'none';
   let wsConnected     = false;
   let totalTicks      = 0;
@@ -719,7 +720,9 @@
 
   function _rebuildPayloadCache() {
     const a = activeAsset || '';
-    const t = snapToPOTime(candlePeriod || 5);
+    // _tradeDuration: user-selected trade expiry from platform UI — used directly (no snap)
+    // fallback to snapToPOTime(candlePeriod) only when no platform duration detected yet
+    const t = _tradeDuration > 0 ? _tradeDuration : snapToPOTime(candlePeriod || 5);
     const amt = tradeAmount;
     const d = isDemo;
     if (_payloadCache.asset === a && _payloadCache.time === t && _payloadCache.amount === amt && _payloadCache.isDemo === d) return;
@@ -734,7 +737,7 @@
   }
 
   function _getCachedPayload(direction, overrideAmount, overrideTime) {
-    const t = overrideTime ? overrideTime : snapToPOTime(candlePeriod || 5);
+    const t = overrideTime ? overrideTime : (_tradeDuration > 0 ? _tradeDuration : snapToPOTime(candlePeriod || 5));
     if (overrideAmount && overrideAmount !== tradeAmount) {
       const a = activeAsset || '', d = isDemo;
       const reqId = _nextReqId();
@@ -2077,8 +2080,14 @@
             if (evName==='changeSymbol' && payload?.asset) onActiveAsset(String(payload.asset), 'changeSymbol_send');
             if (evName==='saveCharts') {
               const s = payload.settings || {};
+              // fastTimeframe = trade expiry chosen by user in platform UI (seconds, any value)
+              // Keep separate from candlePeriod (chart candle period) — they are independent
               const ft = parseInt(s.fastTimeframe, 10);
-              if (Number.isFinite(ft) && ft>=1 && ft<=3600) onPlatformTimeframe(ft, 'saveCharts');
+              if (Number.isFinite(ft) && ft >= 1) {
+                _tradeDuration = ft;
+                _rebuildPayloadCache();
+                updateHUD();
+              }
               if (s.symbol && s.symbol.length>=3) onActiveAsset(s.symbol, 'saveCharts');
               if (s.isDemo !== undefined) isDemo = s.isDemo ? 1 : 0;
               _extractFastCloseAt(s, payload);
@@ -2244,7 +2253,7 @@
           for (const chart of decoded) {
             if (!chart || typeof chart !== 'object') continue;
             if (typeof chart.asset === 'string' && chart.asset.length >= 3) onActiveAsset(chart.asset, 'updateCharts');
-            try { const s = typeof chart.settings==='string' ? JSON.parse(chart.settings) : (chart.settings||{}); const ft = parseInt(s?.fastTimeframe, 10); if (Number.isFinite(ft) && ft>=1 && ft<=3600) onPlatformTimeframe(ft,'updateCharts'); _extractFastCloseAt(s, chart); } catch(_){}
+            try { const s = typeof chart.settings==='string' ? JSON.parse(chart.settings) : (chart.settings||{}); const ft = parseInt(s?.fastTimeframe, 10); if (Number.isFinite(ft) && ft>=1) { _tradeDuration = ft; _rebuildPayloadCache(); } _extractFastCloseAt(s, chart); } catch(_){}
           }
         }
         // v12.2 [PAYOUT] updateAssets — broker sends full asset list with payouts at session start
@@ -2554,7 +2563,7 @@
     const a = normalizeAsset(str);
     if (a.length < 3 || a === activeAsset) return;
     activeAsset = a; _sCandle.reset(); PatternStateMachine.reset(); TickVelocityEngine.reset();
-    fastCloseAt = 0; cancelPredictiveExecution(); _rebuildPayloadCache();
+    fastCloseAt = 0; _tradeDuration = 0; cancelPredictiveExecution(); _rebuildPayloadCache();
     _candlesSinceAssetChange = 0;
     // v12.2 [PAYOUT] Hot-swap dynamic payout when asset changes
     if (_assetPayouts.has(a)) {
@@ -4419,6 +4428,7 @@
         <div class="cb-stat"><span class="cb-stat-lbl">الزوج</span><span class="cb-stat-val w" id="cbAsset">جاري…</span></div>
         <div class="cb-stat"><span class="cb-stat-lbl">السعر</span><span class="cb-stat-val g" id="cbPrice">–</span></div>
         <div class="cb-stat"><span class="cb-stat-lbl">مدة الشمعة</span><span class="cb-stat-val y" id="cbPeriod">؟</span></div>
+        <div class="cb-stat"><span class="cb-stat-lbl">⏱ وقت الصفقة</span><span class="cb-stat-val g" id="cbTradeDur">؟</span></div>
         <div class="cb-stat"><span class="cb-stat-lbl">العد التنازلي</span><span class="cb-stat-val y" id="cbCd">–</span></div>
         <div class="cb-stat"><span class="cb-stat-lbl">الرصيد</span><span class="cb-stat-val g" id="cbBalance">–</span></div>
         <div class="cb-stat"><span class="cb-stat-lbl">تيكات</span><span class="cb-stat-val" id="cbTickCount">0</span></div>
@@ -4753,8 +4763,10 @@
 
   function updateHUD() {
     const aEl=W.document.getElementById('cbAsset'), pEl=W.document.getElementById('cbPeriod');
+    const tdEl=W.document.getElementById('cbTradeDur');
     if (aEl) aEl.textContent = activeAsset || '–';
     if (pEl) pEl.textContent = candlePeriod ? fmtDur(candlePeriod)+'('+durSource+')' : '؟';
+    if (tdEl) tdEl.textContent = _tradeDuration > 0 ? fmtDur(_tradeDuration) : '؟ (تلقائي)';
   }
 
   function updateLivePrice(price) {
