@@ -4435,7 +4435,6 @@
   #cbSpyBtn{position:fixed;bottom:100px;right:8px;z-index:2147483646;padding:6px 12px;border-radius:20px;background:#fff;border:1px solid #D1E8DC;color:#1E3A2F;font-family:'IBM Plex Sans Arabic',-apple-system,sans-serif;font-size:9px;font-weight:700;cursor:pointer;touch-action:manipulation;display:none;align-items:center;gap:5px;box-shadow:0 2px 8px rgba(30,58,47,0.10);}
   #cbSpyBtn.visible{display:flex;}
   #cbSpyCount{background:#F0FDF4;color:#16A34A;border-radius:10px;padding:1px 6px;font-size:7.5px;min-width:16px;text-align:center;border:1px solid #86EFAC;}
-  `
   `;
 
   const HUD_HTML = `
