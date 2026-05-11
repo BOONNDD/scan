@@ -96,6 +96,27 @@ def on_message(ws, msg):
     # Socket.IO connected confirmation
     if msg == "40" or msg.startswith("40{"):
         print(f"[{ts()}] ✓ Socket.IO متصل — في انتظار successauth…")
+        # Auth timeout: إذا ما جاء successauth خلال 5 ثواني → جلسة منتهية
+        def _auth_timeout():
+            if not state["authed"]:
+                print(f"\n[{ts()}] ❌ AUTH timeout — الجلسة منتهية أو غير صالحة")
+                print("  الحل: افتح المتصفح → تصفح pocketoption → أعد تصدير الكوكيز")
+                done_event.set()
+        threading.Timer(5.0, _auth_timeout).start()
+        return
+
+    # Socket.IO server disconnect
+    if msg == "41" or msg.startswith("41"):
+        print(f"\n[{ts()}] ❌ السيرفر قطع الاتصال (41 = Session Rejected)")
+        print("  السبب الأكثر احتمالاً: ci_session انتهت صلاحيتها")
+        print("  الحل :")
+        print("    1) افتح المتصفح على هاتفك")
+        print("    2) ادخل pocketoption وسجّل دخولك")
+        print("    3) افتح إضافة Cookie Extractor → تبويب ⚡ cURL/WS")
+        print("    4) انسخ Cookie String الجديد")
+        print("    5) ضعه في متغير COOKIE في هذا السكريبت")
+        print("    6) أعد التشغيل")
+        done_event.set()
         return
 
     # Parse 42[event, data]
@@ -157,13 +178,15 @@ def on_message(ws, msg):
 
 def on_error(ws, err):
     err_str = str(err)
+    # تجاهل close frame — معالجه في on_close
+    if "opcode=8" in err_str or "fin=1" in err_str:
+        return
     print(f"\n[{ts()}] ✗ خطأ: {err_str}")
     if "403" in err_str:
         if "host_not_allowed" in err_str:
-            print("  السبب: CDN يحجب الاتصال من هذا IP")
-            print("  الحل : شغّل هذا السكريبت من نفس هاتف/جهاز المتصفح")
+            print("  السبب: CDN يحجب — شغّل من نفس هاتف/جهاز المتصفح")
         elif "ip_not_allowed" in err_str:
-            print("  السبب: IP هاتفك اختلف — افتح المتصفح أولاً وسجّل دخولك")
+            print("  السبب: IP اختلف — افتح المتصفح وسجّل دخولك أولاً")
     elif "401" in err_str:
         print("  السبب: الجلسة انتهت — أعد تصدير الكوكيز")
     done_event.set()
