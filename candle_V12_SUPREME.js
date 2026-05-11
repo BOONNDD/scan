@@ -1508,8 +1508,7 @@
   }
 
   function _sendRawOrder(direction, asset, amount) {
-    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) return;
-    try { const packet = _getCachedPayload(direction, _safeAmount(amount)); tradeWSOrig(packet); } catch (_) {}
+    clickTradeButton(direction);
   }
 
   // ── Ghost Trade Simulator — Smart Recovery (Directive 3, loss streak=1) ──────────
@@ -3063,10 +3062,6 @@
   function _cr15Fire(candle, asset) {
     if (!CFG.CR15_ENABLED) return;
     if (asset !== activeAsset) return;
-    // شرط الاتصال: يجب أن يكون WebSocket متصلاً
-    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) {
-      addLog('⚠ CR15 — WebSocket غير متصل', 'error'); return;
-    }
     // شرط الكولداون: منع التكرار قبل انتهاء الصفقة
     const now = Date.now();
     if (now - _cr15LastFire < (CFG.CR15_TRADE_SEC + 2) * 1000) return;
@@ -3085,33 +3080,22 @@
 
     // ── الاتجاه المعاكس: صاعدة → بيع | هابطة → شراء ────────────────
     const direction = candle.isBullish ? 'SELL' : 'BUY';
-    const action    = direction === 'BUY' ? 'call' : 'put';
     const amt       = CFG.CR15_AMOUNT > 0 ? CFG.CR15_AMOUNT : tradeAmount;
 
-    // ── بناء الـ packet مع time=3 مباشرة (تجاوز payloadCache) ─────────
-    const reqId  = _nextReqId();
-    const packet = '42["openOrder",{"asset":"' + asset +
-                   '","amount":' + amt +
-                   ',"action":"' + action +
-                   '","isDemo":' + isDemo +
-                   ',"requestId":' + reqId +
-                   ',"optionType":100,"time":' + CFG.CR15_TRADE_SEC + '}]';
-    try {
-      tradeWSOrig(packet);
+    const ok = clickTradeButton(direction);
+    if (ok) {
       _cr15LastFire = now;
-      // قفل التنفيذ لمنع الصفقة المزدوجة
       tradeExec = true;
       updateTradeBtn();
-      // فك القفل بعد انتهاء الصفقة + 1 ثانية بافر
       setTimeout(() => { tradeExec = false; updateTradeBtn(); }, (CFG.CR15_TRADE_SEC + 1) * 1000);
       addLog(
         '⚡ CR15 ' + (direction === 'BUY' ? '🟢 شراء' : '🔴 بيع') +
         ' — عكس شمعة ' + (candle.isBullish ? 'صاعدة ↑' : 'هابطة ↓') +
-        ' | ' + CFG.CR15_TRADE_SEC + 'ث | $' + amt,
+        ' | زر المنصة | $' + amt,
         'signal'
       );
-    } catch(e) {
-      addLog('❌ CR15 خطأ تنفيذ: ' + e.message, 'error');
+    } else {
+      addLog('❌ CR15 — زر المنصة غير موجود', 'error');
     }
   }
 
@@ -3123,7 +3107,6 @@
   function _cc3Fire(asset) {
     if (!CFG.CC3_ENABLED) return;
     if (asset !== activeAsset) return;
-    if (!tradeWSOrig || !tradeWS || tradeWS.readyState !== 1) return;
     if (tradeExec) return;
     // [v12.3] حارس بيانات البث + تقلب + إيقاف الخسائر + وضع الشبح
     if (_streamStalled) return;
@@ -3143,29 +3126,21 @@
 
     // الاتجاه المعاكس: خضراء → بيع | حمراء → شراء
     const direction = isBull ? 'SELL' : 'BUY';
-    const action    = direction === 'BUY' ? 'call' : 'put';
     const amt       = CFG.CC3_AMOUNT > 0 ? CFG.CC3_AMOUNT : tradeAmount;
 
-    const reqId  = _nextReqId();
-    const packet = '42["openOrder",{"asset":"' + asset +
-                   '","amount":' + amt +
-                   ',"action":"' + action +
-                   '","isDemo":' + isDemo +
-                   ',"requestId":' + reqId +
-                   ',"optionType":100,"time":3}]';
-    try {
-      tradeWSOrig(packet);
+    const ok = clickTradeButton(direction);
+    if (ok) {
       _cc3LastFireCandle = cc.startTime;
       tradeExec = true; updateTradeBtn();
       setTimeout(() => { tradeExec = false; updateTradeBtn(); }, 4000);
       addLog(
         '⏰ CC3 ' + (direction === 'BUY' ? '🟢 شراء' : '🔴 بيع') +
         ' — شمعة ' + (isBull ? 'خضراء↓بيع' : 'حمراء↑شراء') +
-        ' | عند ث٣ | $' + amt,
+        ' | زر المنصة | $' + amt,
         'signal'
       );
-    } catch(e) {
-      addLog('❌ CC3 خطأ: ' + e.message, 'error');
+    } else {
+      addLog('❌ CC3 — زر المنصة غير موجود', 'error');
     }
   }
 
@@ -3807,30 +3782,13 @@
 
     let success = false;
 
-    // ✅ محاولة WS أولاً — Ghost Execution: fire pre-serialized packet for sub-1ms latency
-    if (tradeWSOrig && tradeWS && tradeWS.readyState === 1) {
-      try {
-        const nowPf2 = W.performance?.now?.() ?? Date.now();
-        // TVE يستخدم 3ث دائماً — الزخم العاجل لا يستمر أطول من 3 ثوان
-        const _isTVEFire = _readySignal?.isTVE === true;
-        const ghostOk = !_isTVEFire && !overrideAmount && _ghostExecPacket &&
-                        _ghostExecPacket.signal === direction &&
-                        nowPf2 - _ghostExecPacket.builtAt < 2500;
-        const packet = ghostOk ? _ghostExecPacket.packet
-                                : _getCachedPayload(direction, overrideAmount, _isTVEFire ? 3 : null);
-        _ghostExecPacket = null;
-        tradeWSOrig(packet);
-        success = true;
-        PERF.mark('orderSent'); PERF.report();
-        // ── Bridge: report trade sent ────────────────────────────────────────
-        try { W.__SUPREME_BRIDGE__?.trade?.({ dir: direction, conf: ps?.spConf, ts: Date.now() }); } catch(_) {}
-      } catch(e) { addLog('❌ WS error: '+e.message,'error'); }
-    }
-
-    // ✅ إذا WS فشل أو غير متصل — اضغط الزر
-    if (!success) {
-      success = clickTradeButton(direction);
-      addLog(success ? '🖱 زر المنصة ✓' : '❌ WS غير متصل والزر غير موجود!', success?'info':'error');
+    // ✅ تنفيذ الصفقة عبر زر المنصة فقط
+    _ghostExecPacket = null;
+    success = clickTradeButton(direction);
+    addLog(success ? '🖱 زر المنصة ✓' : '❌ الزر غير موجود — تحقق من الصفحة!', success ? 'info' : 'error');
+    if (success) {
+      PERF.mark('orderSent'); PERF.report();
+      try { W.__SUPREME_BRIDGE__?.trade?.({ dir: direction, conf: ps?.spConf, ts: Date.now() }); } catch(_) {}
     }
 
     if (success && _adaptiveSigmaActive) _resetAdaptiveSigma();
@@ -7199,26 +7157,15 @@
     const priceLbl = sigPrice ? ' سعر:' + sigPrice : '';
     let   success  = false;
 
-    if (wsOk) {
-      try {
-        const reqId  = _nextReqId();
-        const packet = '42["openOrder",{"asset":"' + wsAsset + '","amount":' + amount +
-          ',"action":"' + action + '","isDemo":' + isDemo + ',"requestId":' + reqId +
-          ',"optionType":100,"time":' + snapTime + '}]';
-        tradeWSOrig(packet);
-        success = true;
-      } catch (e) { addLog('❌ [AI-D] خطأ WS: ' + e.message, 'error'); }
-    }
-
-    // Fallback to button click when WS is down (trades on active asset only)
-    if (!success) success = clickTradeButton(dir);
+    // تنفيذ عبر زر المنصة فقط
+    success = clickTradeButton(dir);
 
     if (success) {
       _aiDirectStats.trades++;
       addLog(
         '🤖 [AI-DIRECT] ' + (dir === 'BUY' ? '↑ شراء' : '↓ بيع') +
         ' | ' + wsAsset + ' | ' + tfMin + 'د | $' + amount + priceLbl +
-        (wsOk ? '' : ' 🖱fallback'),
+        ' 🖱زر',
         'signal'
       );
       // PPT tracking: record AI-Direct as a named pattern so win-rate is tracked
@@ -7235,7 +7182,7 @@
         pattern: 'AI-Direct',
       };
     } else {
-      addLog('❌ [AI-D] فشل التنفيذ — WS + زر', 'error');
+      addLog('❌ [AI-D] فشل التنفيذ — زر المنصة غير موجود', 'error');
     }
 
     // Release tradeExec with adaptive lock (same as regular trades)
