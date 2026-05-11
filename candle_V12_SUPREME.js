@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.13)
+// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.14)
 // @namespace    candle-pro-strategy-v12-supreme
-// @version      12.13.0
-// @description  V12.13: payout filter for AI-Direct | normalizeAsset strips # prefix | PPT tracks AI-Direct win-rate
+// @version      12.14.0
+// @description  V12.14: fix PO_VALID_TIMES add 1,2,3 (quick-mode) | fix AI-Direct WS asset name keeps hyphens/# intact
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -490,7 +490,7 @@
   const _v11_setInterval = (fn, ms) => { const id = setInterval(fn, ms); _v11_intervals.push(id); return id; };
   function _v11_clearAllIntervals() { _v11_intervals.forEach(id => clearInterval(id)); _v11_intervals.length = 0; }
 
-  const PO_VALID_TIMES  = [5,10,15,20,25,30,45,60,90,120,180,300,600,900,1800,3600];
+  const PO_VALID_TIMES  = [1,2,3,5,10,15,20,25,30,45,60,90,120,180,300,600,900,1800,3600];
   const TRUSTED_SOURCES = new Set(['saveCharts','platform','updateCharts','history']);
 
   // ══════════════════════════════════════════════════════════════════════
@@ -7130,9 +7130,12 @@
     // AI signals for different assets: if MATCH_ONLY=false, trade on signal asset;
     // if WS is down and signal asset ≠ activeAsset, fall back to button on activeAsset
     const wsOk       = tradeWSOrig && tradeWS && tradeWS.readyState === 1;
+    // rawAsset = exact platform symbol (e.g. "SOL-USD_otc", "#MCD_otc") — used in WS packet
+    // tradeAsset = normalized form — used only for payout lookup, pattern key, logging
     const rawAsset   = wsOk ? (symbol || activeAsset || '') : (activeAsset || '');
     const tradeAsset = normalizeAsset(rawAsset);
-    if (!tradeAsset) { addLog('❌ [AI-D] لا أصل نشط', 'error'); return; }
+    const wsAsset    = rawAsset || tradeAsset; // never normalize for packet
+    if (!wsAsset) { addLog('❌ [AI-D] لا أصل نشط', 'error'); return; }
 
     // Payout filter: skip if asset payout is known and below threshold
     if (CFG.AI_DIRECT_MIN_PAYOUT > 0) {
@@ -7158,7 +7161,7 @@
     if (wsOk) {
       try {
         const reqId  = _nextReqId();
-        const packet = '42["openOrder",{"asset":"' + tradeAsset + '","amount":' + amount +
+        const packet = '42["openOrder",{"asset":"' + wsAsset + '","amount":' + amount +
           ',"action":"' + action + '","isDemo":' + isDemo + ',"requestId":' + reqId +
           ',"optionType":100,"time":' + snapTime + '}]';
         tradeWSOrig(packet);
@@ -7173,7 +7176,7 @@
       _aiDirectStats.trades++;
       addLog(
         '🤖 [AI-DIRECT] ' + (dir === 'BUY' ? '↑ شراء' : '↓ بيع') +
-        ' | ' + tradeAsset + ' | ' + tfMin + 'د | $' + amount + priceLbl +
+        ' | ' + wsAsset + ' | ' + tfMin + 'د | $' + amount + priceLbl +
         (wsOk ? '' : ' 🖱fallback'),
         'signal'
       );
