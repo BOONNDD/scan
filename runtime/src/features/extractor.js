@@ -52,9 +52,10 @@
   const QR = (W.__QR__ = W.__QR__ || {});
   if (QR.features) return;
 
-  const W_FAST = 16;
-  const W_SLOW = 64;
-  const W_WIN  = 64;
+  const W_FAST = 8;
+  const W_SLOW = 32;
+  const W_WIN  = 32;
+  const WARM_MIN = 8;     // emit warm=true after this many ticks
 
   function newAssetState() {
     return {
@@ -217,7 +218,7 @@
     const wb = wickAndBody(s.price);
     const asymmetry = skew(s.ret);
 
-    const warm = s.ret.count >= (W_WIN >> 1);
+    const warm = s.ret.count >= WARM_MIN;
 
     const frame = QR.framePool.acquire();
     frame.asset = tick.asset;

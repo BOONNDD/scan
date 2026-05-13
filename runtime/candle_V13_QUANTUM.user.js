@@ -762,6 +762,11 @@
   if (QR.bus) return;
 
   const channels = new Map();
+  let booted = false;
+  // Pre-boot replay buffer — capped per channel so an early flood of frames
+  // doesn't OOM the runtime.
+  const PRE_BOOT_CAP = 64;
+  const preBoot = new Map();   // channel name → [payload, ...]
 
   function ch(name) {
     let c = channels.get(name);
@@ -790,8 +795,20 @@
   function on(name, fn) {
     const c = ch(name);
     c.subs.push(fn);
+    // Replay any pre-boot buffered events for this channel so late
+    // subscribers see frames that arrived before kernel.boot drained.
+    const pre = preBoot.get(name);
+    if (pre && pre.length > 0) {
+      for (let i = 0; i < pre.length; i++) {
+        try { fn(pre[i]); } catch (_) {}
+      }
+      // First subscriber drains the buffer; subsequent subs see future emits only.
+      preBoot.delete(name);
+    }
     return () => off(name, fn);
   }
+
+  function markBooted() { booted = true; preBoot.clear(); }
 
   function off(name, fn) {
     const c = channels.get(name);
@@ -825,6 +842,15 @@
   function emit(name, payload) {
     const c = ch(name);
     c.emits++;
+    // Pre-boot replay buffer: if no subscribers AND we haven't been
+    // marked booted yet, retain the most recent N emissions per channel.
+    if (!booted && c.subs.length === 0) {
+      let pre = preBoot.get(name);
+      if (!pre) { pre = []; preBoot.set(name, pre); }
+      if (pre.length >= PRE_BOOT_CAP) pre.shift();
+      pre.push(payload);
+      return;
+    }
     if (!c.batched) {
       deliver(c, payload);
       return;
@@ -861,7 +887,7 @@
     channels.forEach((c) => { c.subs.length = 0; c.queue = null; });
   }
 
-  QR.bus = { on, off, emit, configure, snapshot, clear };
+  QR.bus = { on, off, emit, configure, snapshot, clear, markBooted };
 })(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
 
 /* ─── src/core/kernel.js ──────────────────────────────────────────────────── */
@@ -958,6 +984,10 @@
 
     for (let i = 0; i < order.length; i++) bootOne(order[i]);
 
+    // Subscribers are now registered; flush the pre-boot replay buffer and
+    // disable buffering for future emissions.
+    if (QR.bus && QR.bus.markBooted) QR.bus.markBooted();
+
     installGlobalErrorHandlers();
 
     const bootMs = performance.now() - bootStartedAt;
@@ -1003,48 +1033,48 @@
 
 /* ─── src/dom/self_healing.js ──────────────────────────────────────────────────── */
 // dom/self_healing.js
-// Selector registry with fallback chains + mutation-driven cache invalidation.
+// Selector registry with the full V12 fallback chain + React-fiber walk +
+// Arabic/English text matching.
 //
 // Architecture:
-//   The runtime treats every DOM lookup as a *named* selector with an
-//   ordered fallback chain. The registry caches a resolved Element until:
-//     - it is detached, or
-//     - a MutationObserver fires on the document root, or
-//     - the actuator explicitly requests invalidation after a failed click.
-//   When all fallbacks fail, the registry emits `dom.unresolved` and the
-//   pipeline gates execution.
+//   Resolution proceeds in three phases for Higher/Lower:
+//     Phase 1 — fast CSS chain (~40 selectors per side, copied from V12).
+//     Phase 2 — iterate every button/role=button, check React fiber direction
+//               or visible Arabic/English text, prefer largest visible target.
+//     Phase 3 — diagnostic: log the first 8 visible buttons so the user
+//               can identify the right one when nothing matched.
 //
-//   Selectors for Higher/Lower buttons are seeded from the legacy V12's
-//   battle-tested list and extended with text-content matchers for the
-//   Arabic UI.
+//   Generic registrations (other selectors) still use the simple chain
+//   model from the previous V13 design — phases 1–3 only apply to the
+//   `btn.higher` / `btn.lower` resolutions.
 //
 // Optimization:
-//   - One MutationObserver, configured with the smallest subtree needed.
-//   - Resolution is O(chain) only when cache is cold; otherwise O(1).
+//   - Caches resolved Element until detached or until a MutationObserver
+//     burst invalidates.
+//   - Phase 2 is bounded by `document.querySelectorAll('button,...')` —
+//     typically a few dozen nodes on PocketOption.
 //
 // Failure handling:
-//   - On `resolve` returning null, the registry rebinds on the next idle
-//     callback. Repeated failure → degraded mode.
+//   - All exceptions in selector tries are silenced.
+//   - On three consecutive resolutions failing → emit `dom.unresolved` and
+//     ask the actuator to enter degraded mode.
 //
 // Telemetry:
-//   - `dom.resolutions_total`
-//   - `dom.resolutions_failed`
-//   - `dom.rebinds`
-//   - `dom.mutations_observed`
+//   - dom.resolutions_total / resolutions_failed / rebinds / mutations_observed
+//   - dom.resolutions_phase.<n>  (phase that succeeded)
+//   - dom.fiber_hits / dom.text_hits
 //
 // Integration:
-//   Public: register(name, chain), resolve(name), invalidate(name?).
-//   Used by execution/dom_actuator.js.
+//   Public: resolve(name), invalidate(name?), register(name, chain).
 //
 // Latency:
-//   Cached resolve: O(1) plus an `isConnected` check.
+//   Phase 1 cached resolve: O(1). Cold resolve: O(chain). Phase 2: O(buttons).
 //
 // Memory:
-//   Small Map of names → resolution.
+//   Small Map of names → resolution. No per-call allocation when cached.
 //
 // Survivability:
-//   Even when the DOM is hostile, the registry keeps trying without ever
-//   throwing.
+//   Never throws. Repeated misses produce telemetry, not exceptions.
 
 (function (W) {
   'use strict';
@@ -1053,116 +1083,268 @@
 
   function metric(name) { const m = QR.metrics; return m ? m.counter(name) : { inc() {} }; }
 
-  const registry = new Map();   // name → { chain, cached, lastBoundAt }
+  const registry = new Map();        // name → { chain, cached, lastBoundAt }
+  const cachedButtons = { call: null, put: null, at: 0 };
+  const PHASE2_CACHE_MS = 1500;
+
   let observer = null;
   let mutationsBudget = 0;
 
+  // V12's full CSS chain for the call/put buttons.
+  const CALL_SELECTORS = [
+    'button[class*="call"]:not([disabled])',          'button[class*="Call"]:not([disabled])',
+    'button[class*="buy"]:not([disabled])',           'button[class*="Buy"]:not([disabled])',
+    '[class*="deal-btn"][class*="call"]:not([disabled])',
+    '[class*="deal-btn"][class*="up"]:not([disabled])',
+    '[class*="dealBtn"][class*="call"]:not([disabled])',
+    '[class*="button--call"]:not([disabled])',        '[class*="btn--call"]:not([disabled])',
+    '[class*="trade__btn"][class*="call"]:not([disabled])',
+    '[class*="trade-btn"][class*="call"]:not([disabled])',
+    '[data-side="call"]:not([disabled])',             '[data-type="call"]:not([disabled])',
+    '[data-direction="call"]:not([disabled])',        '[data-action="call"]:not([disabled])',
+    '[data-side="up"]:not([disabled])',               '[data-type="up"]:not([disabled])',
+    '[aria-label*="Higher"]:not([disabled])',         '[aria-label*="higher"]:not([disabled])',
+    '[aria-label*="شراء"]:not([disabled])',            '[aria-label*="أعلى"]:not([disabled])',
+    '[aria-label*="Call"]:not([disabled])',           '[aria-label*="Buy"]:not([disabled])',
+    '[class*="call-button"]:not([disabled])',         '[class*="CallButton"]:not([disabled])',
+    '[class*="quick-hl-call"]:not([disabled])',       '[class*="QuickHlCall"]:not([disabled])',
+    '.btn-call', '[class*="btnCall"]', '#call-btn', '#buy-btn',
+    '[class*="buy-btn"]', '[class*="buyBtn"]',        '[class*="tradeCall"]',
+  ];
+  const PUT_SELECTORS = [
+    'button[class*="put"]:not([disabled])',           'button[class*="Put"]:not([disabled])',
+    'button[class*="sell"]:not([disabled])',          'button[class*="Sell"]:not([disabled])',
+    '[class*="deal-btn"][class*="put"]:not([disabled])',
+    '[class*="deal-btn"][class*="down"]:not([disabled])',
+    '[class*="dealBtn"][class*="put"]:not([disabled])',
+    '[class*="button--put"]:not([disabled])',         '[class*="btn--put"]:not([disabled])',
+    '[class*="trade__btn"][class*="put"]:not([disabled])',
+    '[class*="trade-btn"][class*="put"]:not([disabled])',
+    '[data-side="put"]:not([disabled])',              '[data-type="put"]:not([disabled])',
+    '[data-direction="put"]:not([disabled])',         '[data-action="put"]:not([disabled])',
+    '[data-side="down"]:not([disabled])',             '[data-type="down"]:not([disabled])',
+    '[aria-label*="Lower"]:not([disabled])',          '[aria-label*="lower"]:not([disabled])',
+    '[aria-label*="بيع"]:not([disabled])',             '[aria-label*="أدنى"]:not([disabled])',
+    '[aria-label*="Put"]:not([disabled])',            '[aria-label*="Sell"]:not([disabled])',
+    '[class*="put-button"]:not([disabled])',          '[class*="PutButton"]:not([disabled])',
+    '[class*="quick-hl-put"]:not([disabled])',        '[class*="QuickHlPut"]:not([disabled])',
+    '.btn-put', '[class*="btnPut"]', '#put-btn', '#sell-btn',
+    '[class*="sell-btn"]', '[class*="sellBtn"]',      '[class*="tradePut"]',
+  ];
+
+  function isAttached(el) {
+    return !!(el && el.isConnected !== false && W.document && W.document.contains && W.document.contains(el));
+  }
+  function isBtnReady(btn) {
+    if (!btn) return false;
+    try {
+      if (btn.disabled) return false;
+      if (btn.getAttribute && btn.getAttribute('aria-disabled') === 'true') return false;
+      const r = btn.getBoundingClientRect && btn.getBoundingClientRect();
+      if (!r) return true; // headless / shim
+      if (r.width < 8 || r.height < 8) return false;
+    } catch (_) { return true; }
+    return true;
+  }
+
+  function getReactFiber(el) {
+    if (!el) return null;
+    for (const k of Object.keys(el)) {
+      if (k.indexOf('__reactFiber') === 0 || k.indexOf('__reactInternalInstance') === 0) {
+        return el[k];
+      }
+    }
+    return null;
+  }
+
+  function fiberDirection(fiber) {
+    let f = fiber;
+    for (let i = 0; i < 5 && f; i++) {
+      const props = f.memoizedProps || f.pendingProps || {};
+      const dir = props['data-direction'] || props['data-type'] || props.direction || props.type;
+      if (typeof dir === 'string') {
+        const d = dir.toLowerCase();
+        if (d === 'call' || d === 'buy' || d === 'up')   return 'call';
+        if (d === 'put'  || d === 'sell' || d === 'down') return 'put';
+      }
+      if (typeof props.onClick === 'function') {
+        const src = props.onClick.toString().slice(0, 200).toLowerCase();
+        if (src.includes('call') || src.includes('buy'))  return 'call';
+        if (src.includes('put')  || src.includes('sell')) return 'put';
+      }
+      f = f.return;
+    }
+    return null;
+  }
+
+  function tryOneCSS(sel) {
+    try { return W.document.querySelector(sel); } catch (_) { return null; }
+  }
+
+  // Phase 1 — CSS fast path.
+  function phase1(direction) {
+    const list = direction > 0 ? CALL_SELECTORS : PUT_SELECTORS;
+    for (let i = 0; i < list.length; i++) {
+      const el = tryOneCSS(list[i]);
+      if (isBtnReady(el) && isAttached(el)) {
+        metric('dom.resolutions_phase.1').inc();
+        return el;
+      }
+    }
+    return null;
+  }
+
+  // Phase 2 — fiber walk + text/aria match, prefer largest visible candidate.
+  function phase2(direction) {
+    let nodes;
+    try { nodes = W.document.querySelectorAll('button,[role="button"],[class*="btn"],[class*="Btn"]'); }
+    catch (_) { return null; }
+    const candidates = [];
+    for (let i = 0; i < nodes.length; i++) {
+      const btn = nodes[i];
+      if (!isBtnReady(btn) || !isAttached(btn)) continue;
+      const fiber = getReactFiber(btn);
+      if (fiber) {
+        const fd = fiberDirection(fiber);
+        if (fd === 'call' && direction > 0)  { metric('dom.fiber_hits').inc(); return btn; }
+        if (fd === 'put'  && direction < 0)  { metric('dom.fiber_hits').inc(); return btn; }
+      }
+      const txt = ((btn.textContent || btn.innerText || '') + '').trim();
+      const tl = txt.toLowerCase();
+      const aria = ((btn.getAttribute && btn.getAttribute('aria-label')) || '').toLowerCase();
+      const c = tl + ' ' + aria;
+      if (direction > 0 && (txt.includes('شراء') || txt.includes('أعلى') || c.includes('buy') || c.includes('call') || txt.includes('↑') || c.includes('higher') || c.includes('up'))) {
+        candidates.push(btn);
+      }
+      if (direction < 0 && (txt.includes('بيع') || txt.includes('أدنى') || c.includes('sell') || c.includes('put') || txt.includes('↓') || c.includes('lower') || c.includes('down'))) {
+        candidates.push(btn);
+      }
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      try {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return (rb.width * rb.height) - (ra.width * ra.height);
+      } catch (_) { return 0; }
+    });
+    metric('dom.text_hits').inc();
+    metric('dom.resolutions_phase.2').inc();
+    return candidates[0];
+  }
+
+  // Phase 3 — diagnostic dump of visible buttons.
+  function phase3Diagnostic() {
+    try {
+      const nodes = W.document.querySelectorAll('button,[role="button"]');
+      const out = [];
+      for (let i = 0; i < nodes.length && out.length < 8; i++) {
+        const b = nodes[i];
+        let r;
+        try { r = b.getBoundingClientRect(); } catch (_) { continue; }
+        if (!r || r.width < 20 || r.height < 20) continue;
+        const txt = ((b.textContent || '') + '').trim().slice(0, 15);
+        const cls = ((b.className || '') + '').slice(0, 25);
+        out.push('"' + txt + '" [' + cls + ']');
+      }
+      QR.bus.emit('dom.diagnostic', { buttons: out });
+      return out;
+    } catch (_) { return []; }
+  }
+
+  function resolveTradeButton(direction) {
+    metric('dom.resolutions_total').inc();
+    const now = performance.now();
+    const cached = direction > 0 ? cachedButtons.call : cachedButtons.put;
+    if (cached && isBtnReady(cached) && isAttached(cached) && (now - cachedButtons.at) < PHASE2_CACHE_MS) {
+      return cached;
+    }
+    let btn = phase1(direction);
+    if (!btn) btn = phase2(direction);
+    if (btn) {
+      if (direction > 0) cachedButtons.call = btn;
+      else               cachedButtons.put  = btn;
+      cachedButtons.at = now;
+      return btn;
+    }
+    metric('dom.resolutions_failed').inc();
+    phase3Diagnostic();
+    QR.bus.emit('dom.unresolved', { name: direction > 0 ? 'btn.higher' : 'btn.lower' });
+    return null;
+  }
+
+  // Generic registry retained for non-trade selectors.
   function register(name, chain) {
     if (!Array.isArray(chain) || chain.length === 0) return;
     registry.set(name, { chain, cached: null, lastBoundAt: 0 });
   }
-
-  function tryOne(spec) {
-    try {
-      if (typeof spec === 'string') {
-        return W.document.querySelector(spec);
-      }
-      if (spec && typeof spec === 'object') {
-        if (spec.id) return W.document.getElementById(spec.id);
-        if (spec.css) return W.document.querySelector(spec.css);
-        if (spec.text) {
+  function tryOneGeneric(spec) {
+    if (typeof spec === 'string') return tryOneCSS(spec);
+    if (spec && typeof spec === 'object') {
+      if (spec.id)  { try { return W.document.getElementById(spec.id); } catch (_) {} }
+      if (spec.css) return tryOneCSS(spec.css);
+      if (spec.text) {
+        try {
           const sel = spec.scope || '[class],[data-side],button,[role="button"]';
           const nodes = W.document.querySelectorAll(sel);
           for (let i = 0; i < nodes.length; i++) {
-            const t = (nodes[i].textContent || '').trim();
+            const t = ((nodes[i].textContent || '') + '').trim();
             if (spec.exact ? t === spec.text : t.indexOf(spec.text) >= 0) return nodes[i];
           }
-        }
+        } catch (_) {}
       }
-    } catch (_) {}
+    }
     return null;
   }
-
-  function isAttached(el) {
-    return !!(el && el.isConnected !== false && W.document.contains && W.document.contains(el));
+  function resolveGeneric(name) {
+    const rec = registry.get(name);
+    if (!rec) return null;
+    if (rec.cached && isAttached(rec.cached)) return rec.cached;
+    for (let i = 0; i < rec.chain.length; i++) {
+      const el = tryOneGeneric(rec.chain[i]);
+      if (el) { rec.cached = el; rec.lastBoundAt = performance.now(); return el; }
+    }
+    return null;
   }
 
   function resolve(name) {
-    const rec = registry.get(name);
-    if (!rec) return null;
-    metric('dom.resolutions_total').inc();
-    if (rec.cached && isAttached(rec.cached)) return rec.cached;
-
-    for (let i = 0; i < rec.chain.length; i++) {
-      const el = tryOne(rec.chain[i]);
-      if (el) {
-        rec.cached = el;
-        rec.lastBoundAt = performance.now();
-        return el;
-      }
-    }
-    metric('dom.resolutions_failed').inc();
-    QR.bus.emit('dom.unresolved', { name });
-    return null;
+    if (name === 'btn.higher') return resolveTradeButton(+1);
+    if (name === 'btn.lower')  return resolveTradeButton(-1);
+    return resolveGeneric(name);
   }
 
   function invalidate(name) {
     metric('dom.rebinds').inc();
+    if (name === 'btn.higher') { cachedButtons.call = null; return; }
+    if (name === 'btn.lower')  { cachedButtons.put  = null; return; }
     if (name) {
       const r = registry.get(name);
       if (r) r.cached = null;
     } else {
+      cachedButtons.call = cachedButtons.put = null;
       registry.forEach((r) => { r.cached = null; });
     }
   }
 
   function startObserver() {
     if (observer || typeof W.MutationObserver !== 'function' || !W.document || !W.document.body) {
-      // Body not ready yet; retry later.
       QR.scheduler.defer(startObserver, 250, 'dom.observer.retry');
       return;
     }
     observer = new W.MutationObserver(() => {
       mutationsBudget++;
-      // Throttle invalidations — invalidate at most once per 250 ms.
       if (mutationsBudget === 1) {
         QR.scheduler.defer(() => {
           metric('dom.mutations_observed').inc(mutationsBudget);
           mutationsBudget = 0;
           invalidate();
-        }, 250, 'dom.observer.flush');
+        }, 400, 'dom.observer.flush');
       }
     });
-    try {
-      observer.observe(W.document.body, { childList: true, subtree: true, attributes: false });
-    } catch (_) {}
-  }
-
-  function seed() {
-    register('btn.higher', [
-      '[data-side="call"]',
-      '.call-btn',
-      '.quick-hl-call',
-      '.btn-call',
-      'button.action-high-low.button-call-wrap',
-      'a.btn-call',
-      { text: 'أعلى' },
-      { text: 'Higher' },
-    ]);
-    register('btn.lower', [
-      '[data-side="put"]',
-      '.put-btn',
-      '.quick-hl-put',
-      '.btn-put',
-      'button.action-high-low.button-put-wrap',
-      'a.btn-put',
-      { text: 'أدنى' },
-      { text: 'Lower' },
-    ]);
+    try { observer.observe(W.document.body, { childList: true, subtree: true, attributes: false }); }
+    catch (_) {}
   }
 
   function init() {
-    seed();
     startObserver();
   }
 
@@ -1478,49 +1660,46 @@
 
 /* ─── src/ingest/binary_parser.js ──────────────────────────────────────────────────── */
 // ingest/binary_parser.js
-// Socket.io 4.x framing + JSON / binary payload extraction.
+// MsgPack decoder + fragment buffering + Q1 binary signature fast-path.
+// Ported verbatim from V12_SUPREME_HYBRID (commit 543507d) — the parser is
+// battle-tested against live Pocket Option WebSocket frames.
 //
 // Architecture:
-//   The Pocket Option WebSockets speak Engine.IO 4 + Socket.IO 4. Frames look like:
-//     "42" + JSON                — event packet (text)
-//     "451-" + JSON + binary     — event with attached binary parts
-//     "2" / "3"                  — engine.io ping/pong
-//     binary frame               — attachment for the preceding "45N-"
-//
-//   This module is a streaming parser. For each socket it remembers:
-//     - the last pending event name (from a "45N-" header)
-//     - a fragment buffer for binary attachments
-//   It emits normalized event payloads via `ingest.raw_event`.
+//   Two entry points:
+//     parseText(socket, txt)   — "42[event,payload]" or "45N-[event]" framing.
+//     parseBinary(socket, buf) — binary payload that follows a "45N-" header.
+//   For each socket we keep:
+//     - pendingName / pendingAt — per-socket event-name slot with 500ms TTL.
+//     - fragments               — fragment buffer for split msgpack payloads.
+//   Decoded events are emitted on `ingest.raw_event` with `{ name, payload }`.
 //
 // Optimization:
-//   - Text frames are parsed with a single pass, no regex on the hot path.
-//   - Binary frames are passed as ArrayBuffer with byte offsets — no copies
-//     unless we genuinely need to mutate.
-//   - JSON parsing is best-effort; malformed payloads increment a counter.
+//   - Hand-written msgpack reader (no allocations besides decoded objects).
+//   - Q1 fast-path: detects "[["-prefixed tick arrays via byte signature and
+//     bypasses msgpack entirely for the hottest packets.
+//   - Fragment buffer merges via Uint8Array.set, then retries msgpack decode.
 //
 // Failure handling:
-//   - Unknown frame prefixes are logged (sampled) and ignored.
-//   - Pending event names time out after 500 ms — protects against
-//     cross-socket leaks if two sockets are 45N- racing.
+//   - Decode failures push the buffer into the fragment slot, expecting the
+//     next frame to complete the message.
+//   - 500ms TTL on pending event names protects against cross-socket leaks.
+//   - 5s TTL on fragment buffers protects against permanent buffer growth.
 //
 // Telemetry:
-//   - `ingest.parser.text_frames`
-//   - `ingest.parser.binary_frames`
-//   - `ingest.parser.events_emitted`
-//   - `ingest.parser.malformed`
+//   - ingest.parser.text_frames / binary_frames / events_emitted / malformed
+//   - ingest.parser.q1_fast_path / fragment_merge
 //
 // Integration:
-//   `ws_interceptor` calls `parseFrame(socket, data)`. Emits to bus on
-//   channel `ingest.raw_event`. Tick normalizer subscribes to that channel.
+//   Called from ingest/ws_interceptor.js.
 //
 // Latency:
-//   ≈ µs per frame; one JSON.parse on text frames.
+//   Q1 fast-path: ~µs. MsgPack decode: scales with payload size.
 //
 // Memory:
-//   WeakMap<socket, state>. No long-lived allocations per frame.
+//   WeakMap<socket, state>. Fragment buffers bounded by TTL.
 //
 // Survivability:
-//   Parser never throws. All branches return cleanly even on malformed input.
+//   Every decode path is guarded; malformed frames never throw.
 
 (function (W) {
   'use strict';
@@ -1528,7 +1707,13 @@
   if (QR.ingest && QR.ingest.parser) return;
 
   const PENDING_TTL_MS = 500;
+  const FRAG_TTL_MS    = 5000;
+
+  // Per-socket parser state.
   const state = new WeakMap();
+
+  // Q1 signature: leading "[[" indicates a JSON tick array embedded in a binary frame.
+  const Q1_SIG = new Uint8Array([0x5b, 0x5b, 0x22]);
 
   function metric(name) {
     const m = QR.metrics;
@@ -1538,7 +1723,7 @@
   function stateOf(socket) {
     let s = state.get(socket);
     if (!s) {
-      s = { pendingName: '', pendingAt: 0, fragments: [], fragExpected: 0 };
+      s = { pendingName: '', pendingAt: 0, fragBuf: null, fragAt: 0 };
       state.set(socket, s);
     }
     return s;
@@ -1549,73 +1734,152 @@
     QR.bus.emit('ingest.raw_event', event);
   }
 
-  function tryParseJson(s) {
-    try { return JSON.parse(s); } catch (_) {
-      metric('ingest.parser.malformed').inc();
+  // ──────────────────────────────────────────────────────────────────────
+  // MsgPack decoder (ported from V12 verbatim, with minor formatting).
+  // ──────────────────────────────────────────────────────────────────────
+  function msgpackDecode(buffer) {
+    const buf  = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+    const off  = buffer.byteOffset || 0;
+    const view = new DataView(buf);
+    const bytes= new Uint8Array(buf, off);
+    let pos = 0;
+    const rb   = () => bytes[pos++];
+    const ru8  = () => bytes[pos++];
+    const ru16 = () => { const v = view.getUint16(pos, false); pos += 2; return v; };
+    const ru32 = () => { const v = view.getUint32(pos, false); pos += 4; return v; };
+    const ri8  = () => { const v = view.getInt8(pos);          pos += 1; return v; };
+    const ri16 = () => { const v = view.getInt16(pos, false);  pos += 2; return v; };
+    const ri32 = () => { const v = view.getInt32(pos, false);  pos += 4; return v; };
+    const rf32 = () => { const v = view.getFloat32(pos, false);pos += 4; return v; };
+    const rf64 = () => { const v = view.getFloat64(pos, false);pos += 8; return v; };
+    const ri64 = () => { const h = view.getInt32(pos, false), l = view.getUint32(pos+4, false); pos += 8; return h*4294967296+l; };
+    const ru64 = () => { const h = view.getUint32(pos, false), l = view.getUint32(pos+4, false); pos += 8; return h*4294967296+l; };
+    const rStr = (n) => { const s = new TextDecoder().decode(bytes.subarray(pos, pos+n)); pos += n; return s; };
+    const rBin = (n) => { const b = bytes.subarray(pos, pos+n); pos += n; return b; };
+    function decode() {
+      const b = rb();
+      if (b <= 0x7f) return b;
+      if ((b & 0xf0) === 0x80) { const n = b & 0xf; const o = {}; for (let i = 0; i < n; i++) { const k = decode(); o[k] = decode(); } return o; }
+      if ((b & 0xf0) === 0x90) { const n = b & 0xf; const a = []; for (let i = 0; i < n; i++) a.push(decode()); return a; }
+      if ((b & 0xe0) === 0xa0) return rStr(b & 0x1f);
+      if ((b & 0xe0) === 0xe0) return b - 256;
+      switch (b) {
+        case 0xc0: return null; case 0xc2: return false; case 0xc3: return true;
+        case 0xc4: return rBin(ru8());  case 0xc5: return rBin(ru16()); case 0xc6: return rBin(ru32());
+        case 0xca: return rf32();       case 0xcb: return rf64();
+        case 0xcc: return ru8();        case 0xcd: return ru16();      case 0xce: return ru32(); case 0xcf: return ru64();
+        case 0xd0: return ri8();        case 0xd1: return ri16();      case 0xd2: return ri32(); case 0xd3: return ri64();
+        case 0xd9: return rStr(ru8());  case 0xda: return rStr(ru16()); case 0xdb: return rStr(ru32());
+        case 0xdc: { const n = ru16(); const a = []; for (let i = 0; i < n; i++) a.push(decode()); return a; }
+        case 0xdd: { const n = ru32(); const a = []; for (let i = 0; i < n; i++) a.push(decode()); return a; }
+        case 0xde: { const n = ru16(); const o = {}; for (let i = 0; i < n; i++) { const k = decode(); o[k] = decode(); } return o; }
+        case 0xdf: { const n = ru32(); const o = {}; for (let i = 0; i < n; i++) { const k = decode(); o[k] = decode(); } return o; }
+        default: throw new Error('msgpack 0x' + b.toString(16));
+      }
+    }
+    return decode();
+  }
+
+  function q1Match(bytes, sig) {
+    if (bytes.length < sig.length) return false;
+    for (let i = 0; i < sig.length; i++) if (bytes[i] !== sig[i]) return false;
+    return true;
+  }
+
+  function tryDecodeWithFragment(socket, buf) {
+    const s = stateOf(socket);
+    const now = performance.now();
+    let combined = buf;
+    if (s.fragBuf && (now - s.fragAt) <= FRAG_TTL_MS) {
+      const a = new Uint8Array(s.fragBuf);
+      const b = new Uint8Array(buf);
+      const merged = new Uint8Array(a.byteLength + b.byteLength);
+      merged.set(a, 0);
+      merged.set(b, a.byteLength);
+      combined = merged.buffer;
+      metric('ingest.parser.fragment_merge').inc();
+    } else if (s.fragBuf) {
+      s.fragBuf = null;
+    }
+    try {
+      const decoded = msgpackDecode(combined);
+      s.fragBuf = null;
+      return { decoded, buffer: combined };
+    } catch (_) {
+      s.fragBuf = combined;
+      s.fragAt = now;
       return null;
     }
   }
 
-  // Engine.IO type chars are at offset 0. Socket.IO packet type at offset 1.
-  // "42" → EIO message (4), SIO event (2). "451-X" → event with X binary attachments.
+  // ──────────────────────────────────────────────────────────────────────
+  // Text frame parser
+  // ──────────────────────────────────────────────────────────────────────
   function parseText(socket, txt) {
     metric('ingest.parser.text_frames').inc();
-    if (txt.length < 2) return;
-    const eio = txt.charCodeAt(0);
-    if (eio === 50 /* '2' */) return; // ping
-    if (eio === 51 /* '3' */) return; // pong
-    if (eio !== 52 /* '4' */) return;
+    if (!txt || txt === '2' || txt === '3') return;
+    const s = stateOf(socket);
 
-    const sio = txt.charCodeAt(1);
-    if (sio === 53 /* '5' */) {
-      // "45N-" binary-event header
-      let i = 2;
-      let n = 0;
-      while (i < txt.length && txt.charCodeAt(i) >= 48 && txt.charCodeAt(i) <= 57) {
-        n = n * 10 + (txt.charCodeAt(i) - 48);
-        i++;
-      }
-      if (txt.charCodeAt(i) !== 45 /* '-' */) return;
-      i++;
-      const json = tryParseJson(txt.slice(i));
-      if (!json || !Array.isArray(json)) return;
-      const s = stateOf(socket);
-      s.pendingName = String(json[0] || '');
-      s.pendingAt = performance.now();
-      s.fragments.length = 0;
-      s.fragExpected = n;
+    // "45N-[event,...]" — header for an upcoming binary attachment
+    if (txt.startsWith('45')) {
+      const d = txt.indexOf('-');
+      if (d === -1) return;
+      try {
+        const arr = JSON.parse(txt.slice(d + 1));
+        if (Array.isArray(arr) && typeof arr[0] === 'string') {
+          s.pendingName = arr[0];
+          s.pendingAt = performance.now();
+        }
+      } catch (_) { metric('ingest.parser.malformed').inc(); }
       return;
     }
 
-    if (sio === 50 /* '2' */) {
-      // "42[event,payload]"
-      const json = tryParseJson(txt.slice(2));
-      if (!json || !Array.isArray(json)) return;
-      const name = String(json[0] || '');
-      const payload = json.length > 1 ? json[1] : null;
-      emit({ kind: 'json', name, payload, url: socket.url, ts: performance.now() });
-    }
+    // "42[event,payload]" — text event with inline payload
+    if (!txt.startsWith('42')) return;
+    let payload;
+    try { payload = JSON.parse(txt.slice(2)); }
+    catch (_) { metric('ingest.parser.malformed').inc(); return; }
+    if (!Array.isArray(payload) || payload.length < 1) return;
+    const name = String(payload[0] || '');
+    const data = payload.length > 1 ? payload[1] : null;
+    emit({ kind: 'json', name, payload: data, url: socket.url, ts: performance.now() });
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Binary frame parser
+  // ──────────────────────────────────────────────────────────────────────
   function parseBinary(socket, buf) {
     metric('ingest.parser.binary_frames').inc();
     const s = stateOf(socket);
-    if (!s.pendingName || (performance.now() - s.pendingAt) > PENDING_TTL_MS) {
-      // Orphan binary — count it and drop.
-      metric('ingest.parser.orphan_binary').inc();
-      s.pendingName = '';
-      s.fragments.length = 0;
-      return;
+
+    // Resolve the event name from the per-socket pending slot (TTL-guarded).
+    let evName = 'binary';
+    if (s.pendingName && (performance.now() - s.pendingAt) <= PENDING_TTL_MS) {
+      evName = s.pendingName;
     }
-    s.fragments.push(buf);
-    if (s.fragments.length >= s.fragExpected) {
-      const name = s.pendingName;
-      const frags = s.fragments.slice();
-      s.pendingName = '';
-      s.fragments.length = 0;
-      s.fragExpected = 0;
-      emit({ kind: 'binary', name, parts: frags, url: socket.url, ts: performance.now() });
-    }
+    s.pendingName = '';
+
+    // Q1 fast-path: leading "[[" suggests a JSON tick array.
+    try {
+      const bytes = new Uint8Array(buf);
+      if (q1Match(bytes, Q1_SIG)) {
+        metric('ingest.parser.q1_fast_path').inc();
+        const txt = new TextDecoder().decode(bytes);
+        const start = txt.indexOf('[[');
+        if (start >= 0) {
+          try {
+            const arr = JSON.parse(txt.slice(start));
+            emit({ kind: 'json', name: evName === 'binary' ? 'updateStream' : evName, payload: arr, url: socket.url, ts: performance.now() });
+            return;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // Standard path: msgpack with fragment buffering.
+    const fr = tryDecodeWithFragment(socket, buf);
+    if (!fr) return;
+    emit({ kind: 'binary', name: evName, payload: fr.decoded, url: socket.url, ts: performance.now() });
   }
 
   function parseFrame(socket, data) {
@@ -1624,7 +1888,6 @@
     } else if (data instanceof ArrayBuffer) {
       parseBinary(socket, data);
     } else if (data && data.buffer instanceof ArrayBuffer) {
-      // typed array view
       parseBinary(socket, data.buffer);
     } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
       data.arrayBuffer().then((ab) => parseBinary(socket, ab)).catch(() => {
@@ -1634,7 +1897,7 @@
   }
 
   QR.ingest = QR.ingest || {};
-  QR.ingest.parser = { parseFrame };
+  QR.ingest.parser = { parseFrame, msgpackDecode };
 })(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
 
 /* ─── src/ingest/packet_validator.js ──────────────────────────────────────────────────── */
@@ -1764,58 +2027,66 @@
 
 /* ─── src/ingest/tick_normalizer.js ──────────────────────────────────────────────────── */
 // ingest/tick_normalizer.js
-// Canonical Tick — convert platform-shaped events into pooled Tick objects.
+// Canonical Tick + asset normalization + payout discovery + result correlation.
+// All payload-shape logic ported from V12_SUPREME_HYBRID.
 //
 // Architecture:
-//   The platform emits several event names. We care primarily about
-//   `updateStream` (live ticks) and `loadHistoryPeriod` / `updateCharts`
-//   (historical candles). For each `updateStream` payload we acquire a
-//   Tick from the pool, populate canonical fields, run the validator's
-//   sequence/dedup, and emit it on the `tick` channel.
+//   Subscribes to `ingest.raw_event` and dispatches by `name`:
+//     - updateStream / tick / quote / stream → extractTickFromArray + emit `tick`
+//     - updateAssets                          → processUpdateAssets (payouts)
+//     - successcloseOrder / closeOrder        → processCloseOrder (result correlation)
+//     - successopenOrder                      → onOpenOrderSuccess (latency)
+//     - chafor                                → updateAssetTimeframe
+//     - updateCharts / saveCharts / loadHistoryPeriod / history → historical
 //
-//   For historical candles we emit a `tick.historical` event for one-shot
-//   warm-up of feature buffers — they are not routed through the prediction
-//   pipeline.
+//   Asset names are normalized exactly the way V12 normalizes them so that
+//   payout / signal / result maps key on identical strings.
 //
 // Optimization:
-//   - Per-asset monotonic seq counter, bumped on each tick → free dedup key.
-//   - Tick objects are pooled; the consumer is responsible for releasing
-//     them after the frame is built.
+//   - normalizeAsset is the hot-path string normalizer used everywhere.
+//   - Tick objects come from the pool; consumers release them.
 //
 // Failure handling:
-//   - Unknown event names ignored.
-//   - Non-finite numerics drop the tick and increment a counter.
+//   - Defensive shape probing: V12's payout parser scans each item for the
+//     first numeric in [50, 100] (payout%) without depending on field order.
+//   - Drops invalid prices / timestamps with a counter.
 //
 // Telemetry:
-//   - `ingest.normalizer.ticks_total`
-//   - `ingest.normalizer.dropped`
-//   - `ingest.normalizer.assets_seen`  (cardinality gauge, sampled)
+//   - ingest.normalizer.ticks_total / dropped
+//   - ingest.normalizer.payouts_learned
+//   - ingest.normalizer.close_orders / open_orders
 //
 // Integration:
-//   Subscribes to `ingest.validated_event`. Emits on `tick` and `tick.historical`.
+//   Subscribes: `ingest.raw_event`. Emits: `tick`, `tick.historical`,
+//   `ingest.event` (so execution/pipeline can correlate results).
 //
 // Latency:
-//   Single pool acquire + a handful of property assignments.
+//   O(items) for batched payloads; single field assignments for ticks.
 //
 // Memory:
-//   Tick objects come from a 4096-slot pool. Per-asset state map is tiny.
+//   Per-asset state map (seq, lastTs, lastPrice). Bounded.
 //
 // Survivability:
-//   Never throws. If the platform changes its event shapes, the normalizer
-//   stops emitting ticks → recovery layer notices stream stall and
-//   self-healing inspects DOM/version for an update.
+//   Never throws. If the platform changes a shape, the affected branch
+//   stops emitting; telemetry surfaces the drop.
 
 (function (W) {
   'use strict';
   const QR = (W.__QR__ = W.__QR__ || {});
   if (QR.ingest && QR.ingest.normalizer) return;
 
-  const perAsset = new Map();   // asset → { seq, lastTs, lastPrice }
-  let assetsCardinality = 0;
+  const perAsset = new Map();   // normalized asset → { seq, lastTs, lastPrice }
+  const assetPayouts = new Map();   // normalized asset → 0..1 payout fraction
+  const assetIsOpen  = new Map();   // normalized asset → bool
 
   function metric(name) {
     const m = QR.metrics;
     return m ? m.counter(name) : { inc() {} };
+  }
+
+  // V12 normalization: strip leading #, remove separators, collapse otc suffix.
+  function normalizeAsset(s) {
+    return String(s || '').replace(/^#/, '').replace(/[/\\\-\s]/g, '').replace(/_?otc$/i, '_otc');
   }
 
   function getAssetState(asset) {
@@ -1823,24 +2094,48 @@
     if (!s) {
       s = { seq: 0, lastTs: 0, lastPrice: 0 };
       perAsset.set(asset, s);
-      assetsCardinality++;
     }
     return s;
   }
 
+  // Ported from V12 verbatim — handles both shape variants.
+  function extractTickFromArray(arr) {
+    if (!Array.isArray(arr)) return null;
+    if (Array.isArray(arr[0]) && arr[0].length >= 3 && typeof arr[0][0] === 'string' && typeof arr[0][2] === 'number') {
+      const price = arr[0][2];
+      if (price > 0) return { asset: normalizeAsset(arr[0][0]), price, ts: arr[0][1] };
+    }
+    if (arr.length >= 3 && typeof arr[0] === 'string' && typeof arr[2] === 'number') {
+      const price = arr[2];
+      if (price > 0) return { asset: normalizeAsset(arr[0]), price, ts: arr[1] };
+    }
+    return null;
+  }
+
+  function extractChafor(decoded) {
+    if (!Array.isArray(decoded) || !Array.isArray(decoded[0]) || decoded[0].length < 2) return null;
+    const asset = String(decoded[0][0]).toUpperCase();
+    const seconds = Number(decoded[0][1]);
+    if (asset.length >= 3 && Number.isFinite(seconds) && seconds >= 0) {
+      return { asset: normalizeAsset(asset), seconds };
+    }
+    return null;
+  }
+
   function emitTick(asset, ts, price) {
-    if (!asset || !Number.isFinite(ts) || !Number.isFinite(price)) {
+    if (!asset || !Number.isFinite(ts) || !Number.isFinite(price) || price <= 0) {
       metric('ingest.normalizer.dropped').inc();
       return;
     }
+    const tsMs = ts < 1e12 ? ts * 1000 : ts;
     const s = getAssetState(asset);
     s.seq++;
-    s.lastTs = ts;
+    s.lastTs = tsMs;
     s.lastPrice = price;
 
     const tick = QR.tickPool.acquire();
     tick.asset = asset;
-    tick.ts = ts;
+    tick.ts = tsMs;
     tick.price = price;
     tick.seq = s.seq;
     tick.side = 0;
@@ -1848,112 +2143,190 @@
     QR.bus.emit('tick', tick);
   }
 
-  function handleUpdateStream(payload) {
-    // Platform shape: array of arrays — [asset, ts(seconds), price]
-    // Sometimes: { asset, ts, price } — handle defensively.
-    if (Array.isArray(payload)) {
-      for (let i = 0; i < payload.length; i++) {
-        const row = payload[i];
-        if (Array.isArray(row) && row.length >= 3) {
-          const asset = String(row[0]);
-          const tsRaw = +row[1];
-          const ts = tsRaw < 1e12 ? tsRaw * 1000 : tsRaw;
-          const price = +row[2];
-          emitTick(asset, ts, price);
-        } else if (row && typeof row === 'object') {
-          const asset = String(row.asset || '');
-          const ts = +(row.ts || row.time || Date.now());
-          const price = +(row.price || row.close || 0);
-          emitTick(asset, ts, price);
+  // V12's processUpdateAssets — probe each item for the first plausible
+  // payout numeric and the first boolean (isOpen). Exact tuple order varies.
+  function processUpdateAssets(decoded) {
+    if (!Array.isArray(decoded)) return;
+    let parsed = 0;
+    for (const item of decoded) {
+      if (!Array.isArray(item) || item.length < 3) continue;
+      let symbol = null, payout = null, isOpen = null;
+      for (const f of item) {
+        if (symbol === null && typeof f === 'string' && f.length >= 2 && f.length <= 32 && /^[A-Z0-9_/-]+$/i.test(f)) {
+          symbol = f;
+        } else if (payout === null && typeof f === 'number' && f >= 50 && f <= 100) {
+          payout = f;
+        } else if (isOpen === null && typeof f === 'boolean') {
+          isOpen = f;
         }
       }
-      return;
+      if (symbol && payout !== null) {
+        const a = normalizeAsset(symbol);
+        const frac = payout / 100;
+        assetPayouts.set(a, frac);
+        if (isOpen !== null) assetIsOpen.set(a, isOpen);
+        if (QR.risk && QR.risk.setPayout) QR.risk.setPayout(a, frac);
+        parsed++;
+      }
     }
-    if (payload && typeof payload === 'object') {
-      const asset = String(payload.asset || '');
-      const ts = +(payload.ts || payload.time || Date.now());
-      const price = +(payload.price || payload.close || 0);
-      emitTick(asset, ts, price);
+    if (parsed > 0) {
+      const c = QR.metrics && QR.metrics.counter('ingest.normalizer.payouts_learned');
+      if (c) c.inc(parsed);
+      QR.bus.emit('ingest.payouts.updated', { count: parsed });
     }
   }
 
-  function handleHistorical(payload) {
+  // successcloseOrder — broker emits deal result with profit + percentProfit.
+  function processCloseOrder(payload) {
     if (!payload) return;
-    QR.bus.emit('tick.historical', payload);
+    metric('ingest.normalizer.close_orders').inc();
+    const deal = (payload.deals && payload.deals[0]) || payload;
+    if (!deal) return;
+    const asset = normalizeAsset(deal.asset || '');
+    const win = deal.profit > 0;
+    let payoutPct = null;
+    if (typeof deal.percentProfit === 'number' && deal.percentProfit >= 50 && deal.percentProfit <= 100) {
+      payoutPct = deal.percentProfit / 100;
+    } else if (win && deal.profit && deal.amount && deal.amount > 0) {
+      payoutPct = deal.profit / deal.amount;
+    }
+    if (payoutPct !== null && payoutPct > 0.5 && payoutPct < 2.0) {
+      if (asset) assetPayouts.set(asset, payoutPct);
+      if (QR.risk && QR.risk.setPayout && asset) QR.risk.setPayout(asset, payoutPct);
+    }
+    // Emit a canonical close event for the pipeline correlator.
+    QR.bus.emit('ingest.event', {
+      kind: 'json', name: 'successcloseOrder',
+      payload: { asset, profit: deal.profit, amount: deal.amount, percentProfit: deal.percentProfit, id: deal.id },
+      ts: performance.now(),
+    });
   }
 
+  function onOpenOrderSuccess(payload) {
+    metric('ingest.normalizer.open_orders').inc();
+    QR.bus.emit('ingest.event', { kind: 'json', name: 'successopenOrder', payload, ts: performance.now() });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Dispatch
+  // ──────────────────────────────────────────────────────────────────────
   function dispatch(event) {
     if (!event) return;
     const name = event.name;
-    if (name === 'updateStream') {
-      handleUpdateStream(event.payload);
-    } else if (name === 'loadHistoryPeriod' || name === 'updateCharts' || name === 'history') {
-      handleHistorical(event.payload);
+    const data = event.payload;
+
+    if (name === 'updateStream' || name === 'tick' || name === 'quote' || name === 'stream') {
+      const tick = extractTickFromArray(data);
+      if (tick) {
+        emitTick(tick.asset, tick.ts, tick.price);
+      } else if (Array.isArray(data)) {
+        for (const item of data) {
+          const t = extractTickFromArray(Array.isArray(item) ? item : [item]);
+          if (t) emitTick(t.asset, t.ts, t.price);
+        }
+      }
+      QR.bus.emit('ingest.event', event);
+      return;
     }
-    // Other event names (updateAssets, successopenOrder, successcloseOrder, …)
-    // are observed by the execution layer for payout/result side-channels.
+    if (name === 'updateAssets') {
+      processUpdateAssets(data);
+      QR.bus.emit('ingest.event', event);
+      return;
+    }
+    if (name === 'successcloseOrder' || name === 'closeOrder') {
+      processCloseOrder(data);
+      return;
+    }
+    if (name === 'successopenOrder') {
+      onOpenOrderSuccess(data);
+      return;
+    }
+    if (name === 'chafor') {
+      const cf = extractChafor(Array.isArray(data) ? data : [data]);
+      if (cf) QR.bus.emit('asset.timeframe', cf);
+      QR.bus.emit('ingest.event', event);
+      return;
+    }
+    if (name === 'loadHistoryPeriod' || name === 'updateCharts' || name === 'history') {
+      QR.bus.emit('tick.historical', data);
+      QR.bus.emit('ingest.event', event);
+      return;
+    }
+    if (name === 'changeSymbol' && data && data.asset) {
+      QR.bus.emit('asset.active', { asset: normalizeAsset(data.asset), source: 'changeSymbol' });
+      QR.bus.emit('ingest.event', event);
+      return;
+    }
+
+    // Unknown events still flow on the generic ingest.event channel.
     QR.bus.emit('ingest.event', event);
   }
 
   function init() {
-    QR.bus.on('ingest.validated_event', dispatch);
+    QR.bus.on('ingest.raw_event', dispatch);
   }
 
   QR.ingest = QR.ingest || {};
-  QR.ingest.normalizer = { dispatch, assetsCardinality: () => assetsCardinality };
+  QR.ingest.normalizer = {
+    dispatch,
+    normalizeAsset,
+    extractTickFromArray,
+    processUpdateAssets,
+    processCloseOrder,
+    getPayouts: () => new Map(assetPayouts),
+    getOpenMap: () => new Map(assetIsOpen),
+  };
   if (QR.kernel) QR.kernel.register('ingest.normalizer', init);
 })(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
 
 /* ─── src/ingest/ws_interceptor.js ──────────────────────────────────────────────────── */
 // ingest/ws_interceptor.js
-// WebSocket prototype hook — capture all sockets and route incoming frames.
+// WebSocket interception via Proxy(NativeWS) — ported from V12.
 //
 // Architecture:
-//   Patches `WebSocket.prototype.addEventListener` and the `onmessage`
-//   accessor so that every socket the page opens is observed. Each frame
-//   is handed to the binary_parser; the parser may yield 0..N normalized
-//   payloads which are then forwarded as raw events on `ingest.raw`.
-//
-//   We do NOT replace the WebSocket constructor — that would break the
-//   platform's own bookkeeping. We only attach listeners.
+//   Replace `window.WebSocket` with a Proxy over the native constructor.
+//   For every WebSocket constructed by the page we:
+//     1. Attach a `message` listener that hands every frame to the parser.
+//     2. Wrap `ws.send` to observe outbound `42[event,payload]` packets —
+//        this is how we learn `changeSymbol`, `saveCharts`, `openOrder`
+//        without polling.
+//     3. Respond to engine.io ping ('2') with pong ('3') as a keepalive,
+//        matching V12's behavior so the server doesn't time us out.
 //
 // Optimization:
-//   - Listener is a single function reference; no closure allocation per frame.
-//   - ArrayBuffer frames are forwarded by reference; no copy.
-//   - String frames are kept as strings; parser decides whether to copy.
+//   - One Proxy, not prototype-patching, so multiple userscripts can coexist.
+//   - Frame dispatch goes straight to the parser; no copies.
 //
 // Failure handling:
-//   - If the prototype is frozen, we record the failure and fall back to
-//     watching the constructor. If both fail, the runtime enters degraded
-//     mode (no execution, telemetry only).
-//   - Frames whose origin URL does not match the allowed prefix are ignored.
+//   - If WebSocket is missing (e.g., service worker context), this is a
+//     no-op and the runtime enters degraded mode.
+//   - Send-wrapper failures are silenced — they would only break the
+//     platform's own bookkeeping.
 //
 // Telemetry:
-//   - `ingest.ws.sockets_seen`
-//   - `ingest.ws.frames_total`
-//   - `ingest.ws.frames_bytes`
-//   - `ingest.ws.errors`
+//   - ingest.ws.sockets_seen / frames_total / frames_bytes / errors
+//   - ingest.ws.trade_socket_seen
+//   - ingest.ws.outbound_event.<name> (per outbound event type)
 //
 // Integration:
-//   Must run at `document-start`. Kernel boots ingest before features so
-//   subscribers are wired in time.
+//   Must run at @run-at document-start. Re-bootstrappable: if the page
+//   reassigns WebSocket, the Proxy stays intact.
 //
 // Latency:
-//   ~hundreds of nanoseconds per frame to dispatch to the parser.
+//   ~hundreds of nanoseconds per frame.
 //
 // Memory:
-//   One small registry of observed sockets; no per-frame allocation.
+//   One Set of observed sockets; no per-frame allocation.
 //
 // Survivability:
-//   The interceptor never throws into platform code. Any handler exception
-//   is swallowed and counted; the platform never sees it.
+//   The interceptor never throws into platform code. Any handler
+//   exception is swallowed and counted.
 
 (function (W) {
   'use strict';
   const QR = (W.__QR__ = W.__QR__ || {});
   if (QR.ingest && QR.ingest.ws) return;
 
-  const ALLOWED = /(po\.market|pocketoption\.com|chat-po\.site)/i;
   const sockets = new Set();
   let installed = false;
   let degraded = false;
@@ -1963,7 +2336,16 @@
     return m ? m.counter(name) : { inc() {} };
   }
 
-  function emitRaw(socket, data) {
+  function isTradeSocket(url) {
+    if (!url) return false;
+    if (url.includes('po.market')) return true;
+    if (url.includes('chat-po')) return false;
+    if (url.includes('events-po')) return false;
+    if (url.includes('socket.io') && url.includes('api')) return true;
+    return false;
+  }
+
+  function handleFrame(ws, data) {
     metric('ingest.ws.frames_total').inc();
     if (data && data.byteLength) {
       const c = QR.metrics && QR.metrics.counter('ingest.ws.frames_bytes');
@@ -1975,97 +2357,111 @@
     try {
       const parser = QR.ingest && QR.ingest.parser;
       if (!parser) return;
-      parser.parseFrame(socket, data);
-    } catch (e) {
+      parser.parseFrame(ws, data);
+    } catch (_) {
       metric('ingest.ws.errors').inc();
     }
   }
 
-  function attach(socket) {
-    if (sockets.has(socket)) return;
-    if (socket.url && !ALLOWED.test(socket.url)) return;
-    sockets.add(socket);
-    metric('ingest.ws.sockets_seen').inc();
-    QR.bus.emit('ingest.ws.opened', { url: socket.url });
+  function observeOutbound(ws, origSend) {
+    return function patchedSend(data) {
+      if (typeof data === 'string' && data.length > 2 && data.charCodeAt(0) === 52 && data.charCodeAt(1) === 50) {
+        // "42[event,payload]"
+        try {
+          const arr = JSON.parse(data.slice(2));
+          if (Array.isArray(arr) && arr.length >= 1) {
+            const name = String(arr[0] || '');
+            const payload = arr.length > 1 ? arr[1] : null;
+            metric('ingest.ws.outbound_event.' + name).inc();
+            QR.bus.emit('ingest.outbound_event', { name, payload, url: ws.url });
+          }
+        } catch (_) {}
+      }
+      return origSend(data);
+    };
+  }
 
-    const listener = (ev) => emitRaw(socket, ev.data);
+  function attach(ws, url) {
+    if (sockets.has(ws)) return;
+    sockets.add(ws);
+    metric('ingest.ws.sockets_seen').inc();
+    if (isTradeSocket(url)) metric('ingest.ws.trade_socket_seen').inc();
+    QR.bus.emit('ingest.ws.opened', { url });
+
+    // Wrap send to observe outbound events.
     try {
-      socket.addEventListener('message', listener, { passive: true });
+      const origSend = ws.send.bind(ws);
+      ws.send = observeOutbound(ws, origSend);
+    } catch (_) {}
+
+    // Listen for inbound frames + auto-pong on engine.io ping.
+    try {
+      ws.addEventListener('message', (ev) => {
+        const raw = ev.data;
+        if (typeof raw === 'string' && raw === '2') {
+          // engine.io ping → reply with pong; don't forward to parser.
+          try { ws.send('3'); } catch (_) {}
+          return;
+        }
+        handleFrame(ws, raw);
+      }, { passive: true });
     } catch (_) {
-      // Fallback: chain onmessage
-      const prev = socket.onmessage;
-      socket.onmessage = function (ev) {
-        emitRaw(socket, ev.data);
+      // Fallback: chain onmessage.
+      const prev = ws.onmessage;
+      ws.onmessage = function (ev) {
+        if (typeof ev.data === 'string' && ev.data === '2') {
+          try { ws.send('3'); } catch (_) {}
+        } else {
+          handleFrame(ws, ev.data);
+        }
         if (typeof prev === 'function') {
           try { prev.call(this, ev); } catch (_) {}
         }
       };
     }
 
-    socket.addEventListener('close', () => {
-      sockets.delete(socket);
-      QR.bus.emit('ingest.ws.closed', { url: socket.url });
-    }, { once: true });
-  }
-
-  function patchAddEventListener() {
-    const proto = W.WebSocket && W.WebSocket.prototype;
-    if (!proto || typeof proto.addEventListener !== 'function') return false;
-    const orig = proto.addEventListener;
     try {
-      proto.addEventListener = function (type, fn, opts) {
-        if (type === 'message') attach(this);
-        return orig.call(this, type, fn, opts);
-      };
-    } catch (_) {
-      return false;
-    }
-    // Also patch the `onmessage` setter so we observe any later assignment.
-    const desc = Object.getOwnPropertyDescriptor(proto, 'onmessage');
-    if (desc && desc.set) {
-      try {
-        Object.defineProperty(proto, 'onmessage', {
-          configurable: true,
-          enumerable: desc.enumerable,
-          get: desc.get,
-          set: function (fn) {
-            attach(this);
-            return desc.set.call(this, fn);
-          },
-        });
-      } catch (_) {}
-    }
-    return true;
-  }
-
-  function patchConstructor() {
-    const OrigWS = W.WebSocket;
-    if (!OrigWS) return false;
-    try {
-      W.WebSocket = function (url, protocols) {
-        const ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
-        attach(ws);
-        return ws;
-      };
-      W.WebSocket.prototype = OrigWS.prototype;
-      W.WebSocket.CONNECTING = OrigWS.CONNECTING;
-      W.WebSocket.OPEN = OrigWS.OPEN;
-      W.WebSocket.CLOSING = OrigWS.CLOSING;
-      W.WebSocket.CLOSED = OrigWS.CLOSED;
-      return true;
-    } catch (_) {
-      return false;
-    }
+      ws.addEventListener('close', () => {
+        sockets.delete(ws);
+        QR.bus.emit('ingest.ws.closed', { url });
+      }, { once: true });
+    } catch (_) {}
   }
 
   function install() {
     if (installed) return;
     installed = true;
-    const ok1 = patchAddEventListener();
-    const ok2 = ok1 || patchConstructor();
-    if (!ok2) {
+    const NativeWS = W.WebSocket;
+    if (!NativeWS) {
       degraded = true;
-      QR.bus.emit('ingest.ws.degraded', { reason: 'no WebSocket hook available' });
+      QR.bus.emit('ingest.ws.degraded', { reason: 'no_WebSocket' });
+      return;
+    }
+    try {
+      const ProxyWS = new Proxy(NativeWS, {
+        construct(Target, args) {
+          const ws = new Target(...args);
+          attach(ws, String(args[0] || ''));
+          return ws;
+        },
+        apply(Target, thisArg, args) {
+          const ws = new Target(...args);
+          attach(ws, String(args[0] || ''));
+          return ws;
+        },
+        get(Target, prop, receiver) {
+          if (prop === 'CONNECTING') return 0;
+          if (prop === 'OPEN')       return 1;
+          if (prop === 'CLOSING')    return 2;
+          if (prop === 'CLOSED')     return 3;
+          const v = Reflect.get(Target, prop, receiver);
+          return typeof v === 'function' ? v.bind(Target) : v;
+        },
+      });
+      W.WebSocket = ProxyWS;
+    } catch (e) {
+      degraded = true;
+      QR.bus.emit('ingest.ws.degraded', { reason: String(e && e.message || e) });
     }
   }
 
@@ -2074,8 +2470,6 @@
 
   QR.ingest = QR.ingest || {};
   QR.ingest.ws = { install, isDegraded, socketCount };
-
-  // Self-register with the kernel.
   if (QR.kernel) QR.kernel.register('ingest.ws', install);
 })(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
 
@@ -2134,9 +2528,10 @@
   const QR = (W.__QR__ = W.__QR__ || {});
   if (QR.features) return;
 
-  const W_FAST = 16;
-  const W_SLOW = 64;
-  const W_WIN  = 64;
+  const W_FAST = 8;
+  const W_SLOW = 32;
+  const W_WIN  = 32;
+  const WARM_MIN = 8;     // emit warm=true after this many ticks
 
   function newAssetState() {
     return {
@@ -2299,7 +2694,7 @@
     const wb = wickAndBody(s.price);
     const asymmetry = skew(s.ret);
 
-    const warm = s.ret.count >= (W_WIN >> 1);
+    const warm = s.ret.count >= WARM_MIN;
 
     const frame = QR.framePool.acquire();
     frame.asset = tick.asset;
@@ -2990,7 +3385,7 @@
     const score = wSum > 0 ? signed : 0;
     histo('predict.ensemble.score').observe(score);
 
-    const direction = score > 0.05 ? 1 : (score < -0.05 ? -1 : 0);
+    const direction = score > 0.02 ? 1 : (score < -0.02 ? -1 : 0);
     let pRaw = 0.5;
     if (direction !== 0) {
       const oriented = score * direction;          // ∈ [0..1] effectively
@@ -3113,12 +3508,12 @@
   if (QR.risk) return;
 
   const CFG = {
-    kellyMul: 0.25,         // fractional Kelly multiplier (¼ Kelly)
+    kellyMul: 0.50,         // fractional Kelly multiplier (½ Kelly — V12-like)
     payoutDefault: 0.80,    // 80% — overridable per asset via setPayout()
-    minProbEdge: 0.55,      // pCal must exceed this
-    ddCap: 0.20,            // 20% peak-to-trough → halt
-    streakCap: 4,           // 4 losses in a row → halt for cooldown
-    streakShrink: 0.5,      // per recent loss
+    minProbEdge: 0.52,      // pCal must exceed this (V12 was ~0.51)
+    ddCap: 0.25,            // 25% peak-to-trough → halt
+    streakCap: 5,           // 5 losses in a row → halt for cooldown
+    streakShrink: 0.6,      // per recent loss
     haircutVolatile: 0.5,
     haircutReversal: 0.7,
     cooldownAfterStallMs: 30_000,
@@ -3993,11 +4388,34 @@
   let statusDot = null;
   let statusLabel = null;
   let haltBtn = null;
+  let rejectListEl = null;
   let expanded = false;
   let mounted = false;
   let halted = false;
+  const rejectRing = [];   // recent { reason, asset, at }
+  const REJECT_CAP = 12;
 
   function metric(name) { const m = QR.metrics; return m ? m.counter(name) : { inc() {} }; }
+
+  function pushReject(reason, asset) {
+    rejectRing.push({ reason, asset: asset || '', at: performance.now() });
+    if (rejectRing.length > REJECT_CAP) rejectRing.shift();
+    renderRejectList();
+  }
+  function renderRejectList() {
+    if (!rejectListEl) return;
+    if (rejectRing.length === 0) {
+      rejectListEl.textContent = '(none yet)';
+      return;
+    }
+    const lines = [];
+    for (let i = rejectRing.length - 1; i >= 0; i--) {
+      const r = rejectRing[i];
+      const ago = ((performance.now() - r.at) / 1000).toFixed(1) + 's';
+      lines.push(ago.padStart(6, ' ') + '  ' + r.reason + (r.asset ? '  · ' + r.asset : ''));
+    }
+    rejectListEl.textContent = lines.join('\n');
+  }
 
   function loadState() {
     try {
@@ -4156,6 +4574,16 @@
 
     panel.appendChild(actions);
 
+    // Reject log section
+    panel.appendChild(el('div', `color:${COLORS.fgDim};margin:10px 0 4px 0;font-size:10px;letter-spacing:.5px;`, 'WHY NO TRADE'));
+    rejectListEl = el('pre', [
+      `color:${COLORS.fg}`, 'background:rgba(255,255,255,0.04)', 'border-radius:4px',
+      'padding:6px 8px', 'margin:0', 'max-height:130px', 'overflow:auto',
+      'white-space:pre-wrap', 'font-size:10px', 'line-height:1.35',
+    ].join(';'), '(none yet)');
+    panel.appendChild(rejectListEl);
+    renderRejectList();
+
     // Footer hint
     const hint = el('div', `color:${COLORS.fgDim};margin-top:8px;font-size:10px;`,
       'Hide panel: localStorage.QR_PANEL="0"');
@@ -4239,6 +4667,7 @@
     QR.bus.on('pipeline.resumed', () => { halted = false; refreshStatus(); });
     QR.bus.on('execution.halt',   () => { halted = true;  refreshStatus(); });
     QR.bus.on('execution.resume', () => { halted = false; refreshStatus(); });
+    QR.bus.on('pipeline.reject',  (ev) => { if (ev && ev.reason) pushReject(ev.reason, ev.asset); });
     if (isHidden()) return;
     QR.scheduler.defer(build, 800, 'panel.boot');
   }

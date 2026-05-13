@@ -46,6 +46,11 @@
   if (QR.bus) return;
 
   const channels = new Map();
+  let booted = false;
+  // Pre-boot replay buffer — capped per channel so an early flood of frames
+  // doesn't OOM the runtime.
+  const PRE_BOOT_CAP = 64;
+  const preBoot = new Map();   // channel name → [payload, ...]
 
   function ch(name) {
     let c = channels.get(name);
@@ -74,8 +79,20 @@
   function on(name, fn) {
     const c = ch(name);
     c.subs.push(fn);
+    // Replay any pre-boot buffered events for this channel so late
+    // subscribers see frames that arrived before kernel.boot drained.
+    const pre = preBoot.get(name);
+    if (pre && pre.length > 0) {
+      for (let i = 0; i < pre.length; i++) {
+        try { fn(pre[i]); } catch (_) {}
+      }
+      // First subscriber drains the buffer; subsequent subs see future emits only.
+      preBoot.delete(name);
+    }
     return () => off(name, fn);
   }
+
+  function markBooted() { booted = true; preBoot.clear(); }
 
   function off(name, fn) {
     const c = channels.get(name);
@@ -109,6 +126,15 @@
   function emit(name, payload) {
     const c = ch(name);
     c.emits++;
+    // Pre-boot replay buffer: if no subscribers AND we haven't been
+    // marked booted yet, retain the most recent N emissions per channel.
+    if (!booted && c.subs.length === 0) {
+      let pre = preBoot.get(name);
+      if (!pre) { pre = []; preBoot.set(name, pre); }
+      if (pre.length >= PRE_BOOT_CAP) pre.shift();
+      pre.push(payload);
+      return;
+    }
     if (!c.batched) {
       deliver(c, payload);
       return;
@@ -145,5 +171,5 @@
     channels.forEach((c) => { c.subs.length = 0; c.queue = null; });
   }
 
-  QR.bus = { on, off, emit, configure, snapshot, clear };
+  QR.bus = { on, off, emit, configure, snapshot, clear, markBooted };
 })(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);

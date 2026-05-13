@@ -91,6 +91,10 @@
 
     for (let i = 0; i < order.length; i++) bootOne(order[i]);
 
+    // Subscribers are now registered; flush the pre-boot replay buffer and
+    // disable buffering for future emissions.
+    if (QR.bus && QR.bus.markBooted) QR.bus.markBooted();
+
     installGlobalErrorHandlers();
 
     const bootMs = performance.now() - bootStartedAt;

@@ -56,11 +56,34 @@
   let statusDot = null;
   let statusLabel = null;
   let haltBtn = null;
+  let rejectListEl = null;
   let expanded = false;
   let mounted = false;
   let halted = false;
+  const rejectRing = [];   // recent { reason, asset, at }
+  const REJECT_CAP = 12;
 
   function metric(name) { const m = QR.metrics; return m ? m.counter(name) : { inc() {} }; }
+
+  function pushReject(reason, asset) {
+    rejectRing.push({ reason, asset: asset || '', at: performance.now() });
+    if (rejectRing.length > REJECT_CAP) rejectRing.shift();
+    renderRejectList();
+  }
+  function renderRejectList() {
+    if (!rejectListEl) return;
+    if (rejectRing.length === 0) {
+      rejectListEl.textContent = '(none yet)';
+      return;
+    }
+    const lines = [];
+    for (let i = rejectRing.length - 1; i >= 0; i--) {
+      const r = rejectRing[i];
+      const ago = ((performance.now() - r.at) / 1000).toFixed(1) + 's';
+      lines.push(ago.padStart(6, ' ') + '  ' + r.reason + (r.asset ? '  · ' + r.asset : ''));
+    }
+    rejectListEl.textContent = lines.join('\n');
+  }
 
   function loadState() {
     try {
@@ -219,6 +242,16 @@
 
     panel.appendChild(actions);
 
+    // Reject log section
+    panel.appendChild(el('div', `color:${COLORS.fgDim};margin:10px 0 4px 0;font-size:10px;letter-spacing:.5px;`, 'WHY NO TRADE'));
+    rejectListEl = el('pre', [
+      `color:${COLORS.fg}`, 'background:rgba(255,255,255,0.04)', 'border-radius:4px',
+      'padding:6px 8px', 'margin:0', 'max-height:130px', 'overflow:auto',
+      'white-space:pre-wrap', 'font-size:10px', 'line-height:1.35',
+    ].join(';'), '(none yet)');
+    panel.appendChild(rejectListEl);
+    renderRejectList();
+
     // Footer hint
     const hint = el('div', `color:${COLORS.fgDim};margin-top:8px;font-size:10px;`,
       'Hide panel: localStorage.QR_PANEL="0"');
@@ -302,6 +335,7 @@
     QR.bus.on('pipeline.resumed', () => { halted = false; refreshStatus(); });
     QR.bus.on('execution.halt',   () => { halted = true;  refreshStatus(); });
     QR.bus.on('execution.resume', () => { halted = false; refreshStatus(); });
+    QR.bus.on('pipeline.reject',  (ev) => { if (ev && ev.reason) pushReject(ev.reason, ev.asset); });
     if (isHidden()) return;
     QR.scheduler.defer(build, 800, 'panel.boot');
   }

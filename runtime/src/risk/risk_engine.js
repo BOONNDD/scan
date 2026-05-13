@@ -49,12 +49,12 @@
   if (QR.risk) return;
 
   const CFG = {
-    kellyMul: 0.25,         // fractional Kelly multiplier (¼ Kelly)
+    kellyMul: 0.50,         // fractional Kelly multiplier (½ Kelly — V12-like)
     payoutDefault: 0.80,    // 80% — overridable per asset via setPayout()
-    minProbEdge: 0.55,      // pCal must exceed this
-    ddCap: 0.20,            // 20% peak-to-trough → halt
-    streakCap: 4,           // 4 losses in a row → halt for cooldown
-    streakShrink: 0.5,      // per recent loss
+    minProbEdge: 0.52,      // pCal must exceed this (V12 was ~0.51)
+    ddCap: 0.25,            // 25% peak-to-trough → halt
+    streakCap: 5,           // 5 losses in a row → halt for cooldown
+    streakShrink: 0.6,      // per recent loss
     haircutVolatile: 0.5,
     haircutReversal: 0.7,
     cooldownAfterStallMs: 30_000,

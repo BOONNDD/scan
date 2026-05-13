@@ -128,7 +128,7 @@
     const score = wSum > 0 ? signed : 0;
     histo('predict.ensemble.score').observe(score);
 
-    const direction = score > 0.05 ? 1 : (score < -0.05 ? -1 : 0);
+    const direction = score > 0.02 ? 1 : (score < -0.02 ? -1 : 0);
     let pRaw = 0.5;
     if (direction !== 0) {
       const oriented = score * direction;          // ∈ [0..1] effectively
