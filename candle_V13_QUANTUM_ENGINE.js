@@ -195,8 +195,8 @@
     TREND_FILTER_ENABLED   : true,
     SHORT_MODE_NO_TREND_FILTER : true, // ✅ v10.5: SHORT_MODE بلا فلتر اتجاه
     SHORT_MODE_NO_CANDLE_LOCK  : true, // ✅ v10.5: SHORT_MODE بلا قفل الشمعة
-    SIGNAL_WATCHER_MS          : 50,   // V13: ↓ 50ms — أسرع استجابة للفريمات القصيرة
-    SIGNAL_WATCHER_EXPIRY_MS   : 1800, // V13: ↓ 1800ms — إلغاء الإشارة القديمة أسرع
+    SIGNAL_WATCHER_MS          : 25,   // V13+: ↓ 25ms — أسرع استجابة للفريمات القصيرة
+    SIGNAL_WATCHER_EXPIRY_MS   : 1500, // V13+: ↓ 1500ms — إلغاء الإشارة القديمة أسرع
     TRADE_EXEC_TIMEOUT_MS      : 0,  // ✅ v10.8: غير مستخدم — يُحسب ديناميكياً: getAdaptiveCooldown() × 2.5
     MAX_LOSS_STREAK        : 3,
     LOSS_STREAK_PAUSE_MS   : 45000,
@@ -262,20 +262,20 @@
     TVE_PRIORITY           : true,
 
     // ─── Q-2 Predictive ─────────────────────────────────────────────
-    PREDICTIVE_FIRE_MS     : 250,  // V13: رفع الحد الأدنى إلى 250ms
+    PREDICTIVE_FIRE_MS     : 350,  // V13+: رفع الحد الأدنى إلى 350ms — أسرع دخول
     CLOCK_SYNC_ENABLED     : true,
 
     // ─── 🆕 [SEE] Smart Early Entry — دخول ذكي مبكر ────────────────
     // الفكرة: بدل الانتظار حتى إغلاق الشمعة، ندخل مبكراً حسب قوة الإشارة
     // كلما الثقة أعلى → دخلنا أبكر → نستفيد من كامل حركة الشمعة الجديدة
     SEE_ENABLED            : true,
-    SEE_RATIO_HIGH         : 0.55,   // V13: ادخل قبل 55% من طول الشمعة (فريم 3ث → 1650ms مبكراً)
-    SEE_RATIO_MED          : 0.35,   // V13: ادخل قبل 35% (فريم 3ث → 1050ms)
-    SEE_RATIO_LOW          : 0.18,   // V13: ادخل قبل 18% (فريم 3ث → 540ms)
-    SEE_MAX_MS             : 2500,   // V13: سقف 2.5ث — لا دخول مبكر جداً
-    SEE_MIN_MS             : 120,    // V13: حد أدنى 120ms
-    SEE_CONF_HIGH          : 4.0,    // V13: خفض عتبة الثقة العالية
-    SEE_CONF_MED           : 2.8,    // V13: خفض عتبة الثقة المتوسطة
+    SEE_RATIO_HIGH         : 0.62,   // V13+: ادخل قبل 62% من طول الشمعة (فريم 3ث → 1860ms مبكراً)
+    SEE_RATIO_MED          : 0.42,   // V13+: ادخل قبل 42% (فريم 3ث → 1260ms)
+    SEE_RATIO_LOW          : 0.25,   // V13+: ادخل قبل 25% (فريم 3ث → 750ms)
+    SEE_MAX_MS             : 2200,   // V13+: سقف 2.2ث
+    SEE_MIN_MS             : 80,     // V13+: حد أدنى 80ms
+    SEE_CONF_HIGH          : 3.5,    // V13+: عتبة ثقة عالية أسهل وصولاً
+    SEE_CONF_MED           : 2.2,    // V13+: عتبة ثقة متوسطة أسهل وصولاً
 
     // ─── PSM ────────────────────────────────────────────────────────
     PSM_MIN_TICKS          : 2,      // ↓ من 4 (v10.2: على 3ث لا يكفي 4 تيكات!)
@@ -2734,8 +2734,8 @@
           const _elapsed  = now - _pcc.startTime;
           const _total    = candlePeriod * 1000;
           const _pct      = _elapsed / _total;
-          // V13: inject earlier for short TFs — 60% for ≤5s, 65% for ≤15s, 78% otherwise
-          const _injectPct = candlePeriod <= 5 ? 0.60 : candlePeriod <= 15 ? 0.65 : 0.78;
+          // V13+: inject earlier so prediction is ready before SEE fires — 35% for ≤5s, 48% for ≤15s, 65% otherwise
+          const _injectPct = candlePeriod <= 5 ? 0.35 : candlePeriod <= 15 ? 0.48 : 0.65;
           if (_pct >= _injectPct && _pct < 0.95) {
             const _predicted = predictClosePrice(_pcc.prices, 5);
             injectPhantomCandle(a, _predicted, now);
@@ -3405,8 +3405,8 @@
     else                                     ratio = CFG.SEE_RATIO_LOW;
     const earlyMs = Math.round(periodMs * ratio);
     const clamped = Math.min(Math.max(earlyMs, CFG.SEE_MIN_MS), CFG.SEE_MAX_MS);
-    // لا تدخل مبكراً أكثر من 50% من الفريم — نضمن وجود شمعة سابقة للتحليل
-    return Math.min(clamped, Math.round(periodMs * 0.50));
+    // لا تدخل مبكراً أكثر من 62% من الفريم — نضمن وجود شمعة سابقة للتحليل
+    return Math.min(clamped, Math.round(periodMs * 0.62));
   }
   function scheduleExactExecution(targetMs, callback) {
     cancelPredictiveExecution();
@@ -3431,7 +3431,7 @@
     const earlyMs   = getSmartEarlyMs(confScore);
     const fireAt    = fastCloseAt - earlyMs;
     const now       = Date.now();
-    if (fireAt <= now + 30) return;
+    if (fireAt <= now + 15) return;
     addLog('[SEE] 📅 دخول مبكر: '+(earlyMs/1000).toFixed(2)+'ث قبل الإغلاق | SP:'+confScore.toFixed(0)+'%', 'info');
     scheduleExactExecution(fireAt, () => {
       PERF.mark('schedFired');
