@@ -195,8 +195,8 @@
     TREND_FILTER_ENABLED   : true,
     SHORT_MODE_NO_TREND_FILTER : true, // ✅ v10.5: SHORT_MODE بلا فلتر اتجاه
     SHORT_MODE_NO_CANDLE_LOCK  : true, // ✅ v10.5: SHORT_MODE بلا قفل الشمعة
-    SIGNAL_WATCHER_MS          : 100,  // ✅ v12: ↓ 100ms — SUPREME-PRED يُعيد تقييم كل 100ms
-    SIGNAL_WATCHER_EXPIRY_MS   : 2500, // ✅ v12: ↓ 2500ms — أسرع انتهاء للفريمات القصيرة
+    SIGNAL_WATCHER_MS          : 50,   // V13: ↓ 50ms — أسرع استجابة للفريمات القصيرة
+    SIGNAL_WATCHER_EXPIRY_MS   : 1800, // V13: ↓ 1800ms — إلغاء الإشارة القديمة أسرع
     TRADE_EXEC_TIMEOUT_MS      : 0,  // ✅ v10.8: غير مستخدم — يُحسب ديناميكياً: getAdaptiveCooldown() × 2.5
     MAX_LOSS_STREAK        : 3,
     LOSS_STREAK_PAUSE_MS   : 45000,
@@ -262,20 +262,20 @@
     TVE_PRIORITY           : true,
 
     // ─── Q-2 Predictive ─────────────────────────────────────────────
-    PREDICTIVE_FIRE_MS     : 50,
+    PREDICTIVE_FIRE_MS     : 250,  // V13: رفع الحد الأدنى إلى 250ms
     CLOCK_SYNC_ENABLED     : true,
 
     // ─── 🆕 [SEE] Smart Early Entry — دخول ذكي مبكر ────────────────
     // الفكرة: بدل الانتظار حتى إغلاق الشمعة، ندخل مبكراً حسب قوة الإشارة
     // كلما الثقة أعلى → دخلنا أبكر → نستفيد من كامل حركة الشمعة الجديدة
     SEE_ENABLED            : true,
-    SEE_RATIO_HIGH         : 0.35,   // CONF≥4.5 → ادخل قبل 35% من طول الشمعة
-    SEE_RATIO_MED          : 0.20,   // CONF≥3.0 → ادخل قبل 20% من طول الشمعة
-    SEE_RATIO_LOW          : 0.08,   // CONF<3.0  → ادخل قبل 8%  (قريب من الإغلاق)
-    SEE_MAX_MS             : 4000,   // سقف مطلق: لا تدخل مبكراً أكثر من 4 ثوانٍ
-    SEE_MIN_MS             : 50,     // حد أدنى: 50ms (نفس القديم)
-    SEE_CONF_HIGH          : 4.5,    // عتبة الثقة العالية
-    SEE_CONF_MED           : 3.0,    // عتبة الثقة المتوسطة
+    SEE_RATIO_HIGH         : 0.55,   // V13: ادخل قبل 55% من طول الشمعة (فريم 3ث → 1650ms مبكراً)
+    SEE_RATIO_MED          : 0.35,   // V13: ادخل قبل 35% (فريم 3ث → 1050ms)
+    SEE_RATIO_LOW          : 0.18,   // V13: ادخل قبل 18% (فريم 3ث → 540ms)
+    SEE_MAX_MS             : 2500,   // V13: سقف 2.5ث — لا دخول مبكر جداً
+    SEE_MIN_MS             : 120,    // V13: حد أدنى 120ms
+    SEE_CONF_HIGH          : 4.0,    // V13: خفض عتبة الثقة العالية
+    SEE_CONF_MED           : 2.8,    // V13: خفض عتبة الثقة المتوسطة
 
     // ─── PSM ────────────────────────────────────────────────────────
     PSM_MIN_TICKS          : 2,      // ↓ من 4 (v10.2: على 3ث لا يكفي 4 تيكات!)
@@ -2727,17 +2727,37 @@
       _predBarTick(a, price, now);
       updateLivePrice(price); renderCandleRow(); resetTickCandleTimer(a);
 
-      // ── V13: Pre-Candle Injection — inject phantom when 15-20% of candle remains ─
+      // ── V13: Pre-Candle Injection — fires earlier on short timeframes ─
       if (now > _phantomSkipUntil) {
         const _pcc = currentCandles[a];
-        if (_pcc && _pcc.prices.length >= 5 && candlePeriod > 0) {
+        if (_pcc && _pcc.prices.length >= 3 && candlePeriod > 0) {
           const _elapsed  = now - _pcc.startTime;
           const _total    = candlePeriod * 1000;
           const _pct      = _elapsed / _total;
-          // inject window: 80–90% through the candle (15–20% time remaining)
-          if (_pct >= 0.80 && _pct < 0.92) {
+          // V13: inject earlier for short TFs — 60% for ≤5s, 65% for ≤15s, 78% otherwise
+          const _injectPct = candlePeriod <= 5 ? 0.60 : candlePeriod <= 15 ? 0.65 : 0.78;
+          if (_pct >= _injectPct && _pct < 0.95) {
             const _predicted = predictClosePrice(_pcc.prices, 5);
             injectPhantomCandle(a, _predicted, now);
+          }
+        }
+      }
+
+      // ── V13: Dynamic fastCloseAt — computed from candle start + period ─
+      // Critical for 3s candles where server may not send saveCharts in time
+      if (candlePeriod > 0 && autoTrade) {
+        const _pcc2 = currentCandles[a];
+        if (_pcc2 && _pcc2.startTime) {
+          const _dynFCA = _pcc2.startTime + candlePeriod * 1000;
+          const _diff   = Math.abs(_dynFCA - fastCloseAt);
+          if (!fastCloseAt || _diff > 500) {
+            fastCloseAt = _dynFCA;
+          }
+          // Trigger predictive entry when we're in the SEE window
+          const _msLeft = _dynFCA - now;
+          const _earlyMs = getSmartEarlyMs(_PS.spConf ?? 0);
+          if (_msLeft > 0 && _msLeft <= _earlyMs + 100 && _readySignal && !tradeExec) {
+            schedulePredictiveEntry();
           }
         }
       }
