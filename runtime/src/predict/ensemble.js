@@ -52,14 +52,15 @@
 
   // Default per-regime weights — chosen so each regime emphasizes the
   // specialists most likely to be informative there.
+  // Weights sum to 1.0 per regime; sums of <1 imply natural abstention pressure.
   const REGIME_WEIGHTS = {
-    trending:           { momentum: 0.30, meanRevert: 0.05, pressure: 0.20, volatility: 0.10, statistical: 0.15, sequence: 0.20 },
-    ranging:            { momentum: 0.05, meanRevert: 0.30, pressure: 0.10, volatility: 0.10, statistical: 0.20, sequence: 0.25 },
-    volatile:           { momentum: 0.10, meanRevert: 0.10, pressure: 0.10, volatility: 0.30, statistical: 0.10, sequence: 0.30 },
-    compressed:         { momentum: 0.10, meanRevert: 0.20, pressure: 0.10, volatility: 0.15, statistical: 0.20, sequence: 0.25 },
-    reversal_prone:     { momentum: 0.05, meanRevert: 0.35, pressure: 0.10, volatility: 0.15, statistical: 0.10, sequence: 0.25 },
-    manipulation_like:  { momentum: 0.05, meanRevert: 0.05, pressure: 0.05, volatility: 0.10, statistical: 0.05, sequence: 0.05 }, // mostly abstain
-    dead_market:        { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 }, // total abstain
+    trending:           { momentum: 0.34, meanRevert: 0.04, pressure: 0.24, volatility: 0.08, statistical: 0.16, sequence: 0.14 },
+    ranging:            { momentum: 0.06, meanRevert: 0.34, pressure: 0.10, volatility: 0.10, statistical: 0.24, sequence: 0.16 },
+    volatile:           { momentum: 0.10, meanRevert: 0.14, pressure: 0.12, volatility: 0.30, statistical: 0.14, sequence: 0.20 },
+    compressed:         { momentum: 0.10, meanRevert: 0.24, pressure: 0.12, volatility: 0.16, statistical: 0.24, sequence: 0.14 },
+    reversal_prone:     { momentum: 0.05, meanRevert: 0.38, pressure: 0.10, volatility: 0.16, statistical: 0.12, sequence: 0.19 },
+    manipulation_like:  { momentum: 0.05, meanRevert: 0.05, pressure: 0.05, volatility: 0.10, statistical: 0.05, sequence: 0.05 },
+    dead_market:        { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 },
     unstable:           { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 },
     warmup:             { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 },
   };
@@ -79,12 +80,12 @@
   }
 
   function sigmoidScaled(s) {
-    // map [-1..1] → probability via sigmoid with gain k=3
-    const z = 3 * s;
+    // Map [-1..1] → probability via sigmoid. Gain k=5 widens the response so
+    // small but real ensemble scores produce meaningful probabilities, instead
+    // of clustering around 0.5 (which collapses to "no_direction").
+    const z = 5 * s;
     const e = Math.exp(-z);
-    const p = 1 / (1 + e);
-    // Mapped further: keep extremes around 0.5 modestly to avoid overconfidence.
-    return 0.5 + 0.85 * (p - 0.5);
+    return 1 / (1 + e);
   }
 
   function scoreFrame(f) {
@@ -128,7 +129,7 @@
     const score = wSum > 0 ? signed : 0;
     histo('predict.ensemble.score').observe(score);
 
-    const direction = score > 0.02 ? 1 : (score < -0.02 ? -1 : 0);
+    const direction = score > 0.005 ? 1 : (score < -0.005 ? -1 : 0);
     let pRaw = 0.5;
     if (direction !== 0) {
       const oriented = score * direction;          // ∈ [0..1] effectively

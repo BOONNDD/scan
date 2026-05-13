@@ -2778,14 +2778,19 @@
 
   // Reference thresholds — calibrated on synthetic ranges; the runtime can
   // adapt them via online quantile estimators in a future iteration.
+  // Calibrated against quiet OTC pairs (AUDCAD_otc, EURUSD_otc, etc.) where
+  // per-tick realized vol typically sits at 0.2–0.6 bp. Old thresholds put
+  // these assets in dead_market — which had zero ensemble weight, so the
+  // runtime never traded. New thresholds reserve dead_market for truly flat
+  // sessions (vol < 0.15 bp).
   const T = {
-    volHighBp: 8,
-    volLowBp: 1.5,
-    entropyHigh: 0.97,   // near-random
-    entropyLow: 0.75,    // strongly directional
-    pressureStrong: 6e-5,
-    accelStrong: 4e-5,
-    deadVelBp: 0.6,
+    volHighBp: 6,
+    volLowBp: 0.5,
+    entropyHigh: 0.97,
+    entropyLow: 0.80,
+    pressureStrong: 2e-5,
+    accelStrong: 1e-5,
+    deadVelBp: 0.15,
     wickDomHigh: 0.65,
   };
 
@@ -2814,13 +2819,14 @@
     const vel = f.velocity * 10000; // bp-scale
 
     if (vel < T.deadVelBp && vol < T.volLowBp) return 'dead_market';
-    if (vol > T.volHighBp && ent > T.entropyHigh) return 'volatile';
     if (vol > T.volHighBp && Math.abs(prs) > T.pressureStrong && Math.abs(acc) > T.accelStrong) return 'manipulation_like';
+    if (vol > T.volHighBp && ent > T.entropyHigh) return 'volatile';
+    if (f.wickDominance > T.wickDomHigh && Math.abs(acc) > T.accelStrong) return 'reversal_prone';
     if (vol < T.volLowBp && ent > T.entropyHigh) return 'compressed';
     if (ent < T.entropyLow && Math.abs(prs) > T.pressureStrong) return 'trending';
-    if (ent > T.entropyHigh && Math.abs(prs) < T.pressureStrong) return 'ranging';
-    if (f.wickDominance > T.wickDomHigh && Math.abs(acc) > T.accelStrong) return 'reversal_prone';
-    return 'unstable';
+    // Fallback: 'ranging' is tradeable. 'unstable' is reserved for NaN / Infinity
+    // and one-off feature corruption — not a generic "I don't know" bucket.
+    return 'ranging';
   }
 
   function onFrame(f) {
@@ -2911,14 +2917,14 @@
     if (!Number.isFinite(f.pressure) || !Number.isFinite(f.runLength)) return 0;
     // Run length encodes persistence; pressure encodes direction.
     const sgn = f.pressure > 0 ? 1 : (f.pressure < 0 ? -1 : 0);
-    const persist = clamp(Math.abs(f.runLength) / 8, 0, 1);
-    return sgn * persist * 0.9;
+    const persist = clamp(Math.abs(f.runLength) / 5, 0, 1);
+    return sgn * persist;
   }
 
   function meanRevert(f) {
     if (!Number.isFinite(f.pressure) || !Number.isFinite(f.entropy)) return 0;
     // Fade extreme pressure when entropy is moderate (not yet random).
-    const extreme = tanh(Math.abs(f.pressure) / 1e-4);
+    const extreme = tanh(Math.abs(f.pressure) / 3e-5);
     const fadeable = clamp((0.95 - f.entropy) * 5, 0, 1);
     const sgn = f.pressure > 0 ? -1 : 1;
     return sgn * extreme * fadeable;
@@ -2926,21 +2932,23 @@
 
   function pressure(f) {
     if (!Number.isFinite(f.pressure)) return 0;
-    return tanh(f.pressure / 5e-5);
+    // Pressure on slow assets sits in 1e-6..5e-5; scale so typical
+    // signed pressure produces a vote magnitude near 0.3..0.6.
+    return tanh(f.pressure / 1.5e-5);
   }
 
   function volatility(f) {
     if (!Number.isFinite(f.realizedVolBp) || !Number.isFinite(f.asymmetry)) return 0;
     // In volatile regimes the skew of recent returns is a leading hint.
-    const intensity = clamp(f.realizedVolBp / 10, 0, 1);
+    const intensity = clamp(f.realizedVolBp / 5, 0, 1);
     return clamp(f.asymmetry, -2, 2) / 2 * intensity;
   }
 
   function statistical(f) {
     if (!Number.isFinite(f.velocity) || !Number.isFinite(f.realizedVolBp)) return 0;
-    if (f.realizedVolBp < 1e-3) return 0;
+    if (f.realizedVolBp < 1e-4) return 0;
     // Z-score on directional acceleration normalized by realized vol.
-    const z = (f.acceleration * 10000) / Math.max(f.realizedVolBp, 1);
+    const z = (f.acceleration * 10000) / Math.max(f.realizedVolBp, 0.5);
     return tanh(z);
   }
 
@@ -3309,14 +3317,15 @@
 
   // Default per-regime weights — chosen so each regime emphasizes the
   // specialists most likely to be informative there.
+  // Weights sum to 1.0 per regime; sums of <1 imply natural abstention pressure.
   const REGIME_WEIGHTS = {
-    trending:           { momentum: 0.30, meanRevert: 0.05, pressure: 0.20, volatility: 0.10, statistical: 0.15, sequence: 0.20 },
-    ranging:            { momentum: 0.05, meanRevert: 0.30, pressure: 0.10, volatility: 0.10, statistical: 0.20, sequence: 0.25 },
-    volatile:           { momentum: 0.10, meanRevert: 0.10, pressure: 0.10, volatility: 0.30, statistical: 0.10, sequence: 0.30 },
-    compressed:         { momentum: 0.10, meanRevert: 0.20, pressure: 0.10, volatility: 0.15, statistical: 0.20, sequence: 0.25 },
-    reversal_prone:     { momentum: 0.05, meanRevert: 0.35, pressure: 0.10, volatility: 0.15, statistical: 0.10, sequence: 0.25 },
-    manipulation_like:  { momentum: 0.05, meanRevert: 0.05, pressure: 0.05, volatility: 0.10, statistical: 0.05, sequence: 0.05 }, // mostly abstain
-    dead_market:        { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 }, // total abstain
+    trending:           { momentum: 0.34, meanRevert: 0.04, pressure: 0.24, volatility: 0.08, statistical: 0.16, sequence: 0.14 },
+    ranging:            { momentum: 0.06, meanRevert: 0.34, pressure: 0.10, volatility: 0.10, statistical: 0.24, sequence: 0.16 },
+    volatile:           { momentum: 0.10, meanRevert: 0.14, pressure: 0.12, volatility: 0.30, statistical: 0.14, sequence: 0.20 },
+    compressed:         { momentum: 0.10, meanRevert: 0.24, pressure: 0.12, volatility: 0.16, statistical: 0.24, sequence: 0.14 },
+    reversal_prone:     { momentum: 0.05, meanRevert: 0.38, pressure: 0.10, volatility: 0.16, statistical: 0.12, sequence: 0.19 },
+    manipulation_like:  { momentum: 0.05, meanRevert: 0.05, pressure: 0.05, volatility: 0.10, statistical: 0.05, sequence: 0.05 },
+    dead_market:        { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 },
     unstable:           { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 },
     warmup:             { momentum: 0.00, meanRevert: 0.00, pressure: 0.00, volatility: 0.00, statistical: 0.00, sequence: 0.00 },
   };
@@ -3336,12 +3345,12 @@
   }
 
   function sigmoidScaled(s) {
-    // map [-1..1] → probability via sigmoid with gain k=3
-    const z = 3 * s;
+    // Map [-1..1] → probability via sigmoid. Gain k=5 widens the response so
+    // small but real ensemble scores produce meaningful probabilities, instead
+    // of clustering around 0.5 (which collapses to "no_direction").
+    const z = 5 * s;
     const e = Math.exp(-z);
-    const p = 1 / (1 + e);
-    // Mapped further: keep extremes around 0.5 modestly to avoid overconfidence.
-    return 0.5 + 0.85 * (p - 0.5);
+    return 1 / (1 + e);
   }
 
   function scoreFrame(f) {
@@ -3385,7 +3394,7 @@
     const score = wSum > 0 ? signed : 0;
     histo('predict.ensemble.score').observe(score);
 
-    const direction = score > 0.02 ? 1 : (score < -0.02 ? -1 : 0);
+    const direction = score > 0.005 ? 1 : (score < -0.005 ? -1 : 0);
     let pRaw = 0.5;
     if (direction !== 0) {
       const oriented = score * direction;          // ∈ [0..1] effectively

@@ -48,14 +48,19 @@
 
   // Reference thresholds — calibrated on synthetic ranges; the runtime can
   // adapt them via online quantile estimators in a future iteration.
+  // Calibrated against quiet OTC pairs (AUDCAD_otc, EURUSD_otc, etc.) where
+  // per-tick realized vol typically sits at 0.2–0.6 bp. Old thresholds put
+  // these assets in dead_market — which had zero ensemble weight, so the
+  // runtime never traded. New thresholds reserve dead_market for truly flat
+  // sessions (vol < 0.15 bp).
   const T = {
-    volHighBp: 8,
-    volLowBp: 1.5,
-    entropyHigh: 0.97,   // near-random
-    entropyLow: 0.75,    // strongly directional
-    pressureStrong: 6e-5,
-    accelStrong: 4e-5,
-    deadVelBp: 0.6,
+    volHighBp: 6,
+    volLowBp: 0.5,
+    entropyHigh: 0.97,
+    entropyLow: 0.80,
+    pressureStrong: 2e-5,
+    accelStrong: 1e-5,
+    deadVelBp: 0.15,
     wickDomHigh: 0.65,
   };
 
@@ -84,13 +89,14 @@
     const vel = f.velocity * 10000; // bp-scale
 
     if (vel < T.deadVelBp && vol < T.volLowBp) return 'dead_market';
-    if (vol > T.volHighBp && ent > T.entropyHigh) return 'volatile';
     if (vol > T.volHighBp && Math.abs(prs) > T.pressureStrong && Math.abs(acc) > T.accelStrong) return 'manipulation_like';
+    if (vol > T.volHighBp && ent > T.entropyHigh) return 'volatile';
+    if (f.wickDominance > T.wickDomHigh && Math.abs(acc) > T.accelStrong) return 'reversal_prone';
     if (vol < T.volLowBp && ent > T.entropyHigh) return 'compressed';
     if (ent < T.entropyLow && Math.abs(prs) > T.pressureStrong) return 'trending';
-    if (ent > T.entropyHigh && Math.abs(prs) < T.pressureStrong) return 'ranging';
-    if (f.wickDominance > T.wickDomHigh && Math.abs(acc) > T.accelStrong) return 'reversal_prone';
-    return 'unstable';
+    // Fallback: 'ranging' is tradeable. 'unstable' is reserved for NaN / Infinity
+    // and one-off feature corruption — not a generic "I don't know" bucket.
+    return 'ranging';
   }
 
   function onFrame(f) {

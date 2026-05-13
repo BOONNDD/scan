@@ -50,14 +50,14 @@
     if (!Number.isFinite(f.pressure) || !Number.isFinite(f.runLength)) return 0;
     // Run length encodes persistence; pressure encodes direction.
     const sgn = f.pressure > 0 ? 1 : (f.pressure < 0 ? -1 : 0);
-    const persist = clamp(Math.abs(f.runLength) / 8, 0, 1);
-    return sgn * persist * 0.9;
+    const persist = clamp(Math.abs(f.runLength) / 5, 0, 1);
+    return sgn * persist;
   }
 
   function meanRevert(f) {
     if (!Number.isFinite(f.pressure) || !Number.isFinite(f.entropy)) return 0;
     // Fade extreme pressure when entropy is moderate (not yet random).
-    const extreme = tanh(Math.abs(f.pressure) / 1e-4);
+    const extreme = tanh(Math.abs(f.pressure) / 3e-5);
     const fadeable = clamp((0.95 - f.entropy) * 5, 0, 1);
     const sgn = f.pressure > 0 ? -1 : 1;
     return sgn * extreme * fadeable;
@@ -65,21 +65,23 @@
 
   function pressure(f) {
     if (!Number.isFinite(f.pressure)) return 0;
-    return tanh(f.pressure / 5e-5);
+    // Pressure on slow assets sits in 1e-6..5e-5; scale so typical
+    // signed pressure produces a vote magnitude near 0.3..0.6.
+    return tanh(f.pressure / 1.5e-5);
   }
 
   function volatility(f) {
     if (!Number.isFinite(f.realizedVolBp) || !Number.isFinite(f.asymmetry)) return 0;
     // In volatile regimes the skew of recent returns is a leading hint.
-    const intensity = clamp(f.realizedVolBp / 10, 0, 1);
+    const intensity = clamp(f.realizedVolBp / 5, 0, 1);
     return clamp(f.asymmetry, -2, 2) / 2 * intensity;
   }
 
   function statistical(f) {
     if (!Number.isFinite(f.velocity) || !Number.isFinite(f.realizedVolBp)) return 0;
-    if (f.realizedVolBp < 1e-3) return 0;
+    if (f.realizedVolBp < 1e-4) return 0;
     // Z-score on directional acceleration normalized by realized vol.
-    const z = (f.acceleration * 10000) / Math.max(f.realizedVolBp, 1);
+    const z = (f.acceleration * 10000) / Math.max(f.realizedVolBp, 0.5);
     return tanh(z);
   }
 
