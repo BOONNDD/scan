@@ -4530,24 +4530,24 @@
     <div id="cbLogHdr">
       <span class="cb-log-title">⚡ السجل الحي</span>
       <div class="cb-log-hdr-btns">
-        <button class="cb-log-hbtn" id="cbLogCopy">📋 نسخ</button>
-        <button class="cb-log-hbtn" id="cbLogPause">⏸ وقفة</button>
-        <button class="cb-log-hbtn" id="cbLogClear">🗑 مسح</button>
-        <button class="cb-log-hbtn" id="cbLogClose">✕</button>
+        <button class="cb-log-hbtn" id="cbLogCopy"  onclick="window._cbCopyLog&&window._cbCopyLog()">📋 نسخ</button>
+        <button class="cb-log-hbtn" id="cbLogPause" onclick="window._cbPauseLog&&window._cbPauseLog()">⏸ وقفة</button>
+        <button class="cb-log-hbtn" id="cbLogClear" onclick="window._cbClearLog&&window._cbClearLog()">🗑 مسح</button>
+        <button class="cb-log-hbtn" id="cbLogClose" onclick="window._cbCloseLog&&window._cbCloseLog()">✕</button>
       </div>
     </div>
     <div class="cb-log-filters">
-      <button class="cb-log-filter active" data-filter="all">الكل</button>
-      <button class="cb-log-filter f-signal" data-filter="signal">🟢 صفقات</button>
-      <button class="cb-log-filter f-error" data-filter="error">🔴 رفض</button>
-      <button class="cb-log-filter f-tve" data-filter="tve">⚡ TVE</button>
-      <button class="cb-log-filter f-tick" data-filter="tick">📡 تيك</button>
-      <button class="cb-log-filter" data-filter="info">ℹ معلومات</button>
+      <button class="cb-log-filter active" data-filter="all"    onclick="window._cbLogFilter&&window._cbLogFilter('all',this)">الكل</button>
+      <button class="cb-log-filter f-signal" data-filter="signal" onclick="window._cbLogFilter&&window._cbLogFilter('signal',this)">🟢 صفقات</button>
+      <button class="cb-log-filter f-error"  data-filter="error"  onclick="window._cbLogFilter&&window._cbLogFilter('error',this)">🔴 رفض</button>
+      <button class="cb-log-filter f-tve"    data-filter="tve"    onclick="window._cbLogFilter&&window._cbLogFilter('tve',this)">⚡ TVE</button>
+      <button class="cb-log-filter f-tick"   data-filter="tick"   onclick="window._cbLogFilter&&window._cbLogFilter('tick',this)">📡 تيك</button>
+      <button class="cb-log-filter"          data-filter="info"   onclick="window._cbLogFilter&&window._cbLogFilter('info',this)">ℹ معلومات</button>
     </div>
     <div class="cb-log-inner" id="cbLogInner"></div>
   </div>
-  <button id="cbLogToggle">📋 السجل <span id="cbLogCount">0</span></button>
-  <button id="cbSpyBtn">🔍 SPY <span id="cbSpyCount">0</span></button>
+  <button id="cbLogToggle" onclick="window._cbToggleLog&&window._cbToggleLog()">📋 السجل <span id="cbLogCount">0</span></button>
+  <button id="cbSpyBtn" onclick="window._cbToggleSpy&&window._cbToggleSpy()">🔍 SPY <span id="cbSpyCount">0</span></button>
   <div id="cbSpyPanel">
     <div id="cbSpyHdr">
       <span class="spy-title">🔍 SPY — WS#1/WS#2 Raw Data</span>
@@ -4556,7 +4556,7 @@
         <button class="spy-btn" id="cbSpyCopyAll">⎘ Copy All</button>
         <button class="spy-btn" id="cbSpyCopyAI">★ Copy AI</button>
         <button class="spy-btn" id="cbSpyClear">✕ Clear</button>
-        <button class="spy-btn" id="cbSpyClose">✕</button>
+        <button class="spy-btn" id="cbSpyClose" onclick="window._cbCloseSpy&&window._cbCloseSpy()">✕</button>
       </div>
     </div>
     <div id="cbSpyFilters">
@@ -4571,22 +4571,22 @@
   </div>
 
   <!-- ═══ HYBRID ANALYSIS PANEL ═══ -->
-  <button id="cbAnalBtn">📊 تحليل <span id="cbAnalCount">0</span></button>
+  <button id="cbAnalBtn" onclick="window._cbToggleAnal&&window._cbToggleAnal()">📊 تحليل <span id="cbAnalCount">0</span></button>
   <div id="cbAnalPanel">
     <div id="cbAnalHdr">
       <span class="cb-anal-title">📊 تحليل ETC — سجل الصفقات التفصيلي</span>
       <div class="cb-anal-hdr-btns">
-        <button class="cb-anal-hbtn" id="cbAnalExport">📤 تصدير JSON</button>
-        <button class="cb-anal-hbtn" id="cbAnalExportTxt">📋 تصدير نص</button>
-        <button class="cb-anal-hbtn" id="cbAnalClear">🗑 مسح</button>
-        <button class="cb-anal-hbtn" id="cbAnalClose">✕</button>
+        <button class="cb-anal-hbtn" id="cbAnalExport" onclick="window._cbAnalExportJson&&window._cbAnalExportJson()">📤 تصدير JSON</button>
+        <button class="cb-anal-hbtn" id="cbAnalExportTxt" onclick="window._cbAnalExportTxt&&window._cbAnalExportTxt()">📋 تصدير نص</button>
+        <button class="cb-anal-hbtn" id="cbAnalClear" onclick="window._cbAnalClear&&window._cbAnalClear()">🗑 مسح</button>
+        <button class="cb-anal-hbtn" id="cbAnalClose" onclick="window._cbCloseAnal&&window._cbCloseAnal()">✕</button>
       </div>
     </div>
     <div id="cbAnalSummary"></div>
     <div class="cb-anal-tabs">
-      <button class="cb-anal-tab active" data-t="etc">⚡ ETC (${ETC_MAX_HIST})</button>
-      <button class="cb-anal-tab" data-t="log">📋 سجل الصفقات</button>
-      <button class="cb-anal-tab" data-t="pat">🏆 الأنماط</button>
+      <button class="cb-anal-tab active" data-t="etc" onclick="window._cbAnalTab&&window._cbAnalTab('etc',this)">⚡ ETC (${ETC_MAX_HIST})</button>
+      <button class="cb-anal-tab" data-t="log" onclick="window._cbAnalTab&&window._cbAnalTab('log',this)">📋 سجل الصفقات</button>
+      <button class="cb-anal-tab" data-t="pat" onclick="window._cbAnalTab&&window._cbAnalTab('pat',this)">🏆 الأنماط</button>
     </div>
     <div id="cbAnalBody"></div>
   </div>
@@ -4711,11 +4711,12 @@
       setTimeout(() => { if (spyBtn) spyBtn.classList.toggle('visible', !!(main && main.classList.contains('open'))); }, 50);
     });
 
-    spyBtn.addEventListener('click', () => {
+    // V13: expose on window for reliable onclick on Android mobile
+    W._cbToggleSpy = function() {
       spyPanel.classList.toggle('open');
       if (spyPanel.classList.contains('open')) { spyBtn.classList.add('visible'); _spyRender(); }
-    });
-    spyClose?.addEventListener('click', () => spyPanel.classList.remove('open'));
+    };
+    W._cbCloseSpy = function() { spyPanel.classList.remove('open'); };
 
     // Copy All
     copAll?.addEventListener('click', () => {
@@ -4951,48 +4952,25 @@
     const clrBtn = W.document.getElementById('cbAnalClear');
     if (!btn || !panel) return;
 
-    btn.addEventListener('click', () => {
-      panel.classList.toggle('open');
-      if (panel.classList.contains('open')) _analRender();
-    });
-    closeB?.addEventListener('click', () => panel.classList.remove('open'));
-
-    // تبويبات
-    panel.querySelectorAll('.cb-anal-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        panel.querySelectorAll('.cb-anal-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        _analCurrentTab = tab.dataset.t;
-        _analRender();
-      });
-    });
-
-    // تصدير JSON
-    expJ?.addEventListener('click', () => {
-      const json = _analExportJSON();
-      navigator.clipboard.writeText(json)
-        .then(() => { expJ.textContent = '✅ تم النسخ'; expJ.classList.add('ok'); setTimeout(() => { expJ.textContent = '📤 تصدير JSON'; expJ.classList.remove('ok'); }, 2500); })
-        .catch(() => { expJ.textContent = '❌ خطأ'; setTimeout(() => { expJ.textContent = '📤 تصدير JSON'; }, 2000); });
-    });
-
-    // تصدير نص
-    expT?.addEventListener('click', () => {
-      const txt = _analExportText();
-      navigator.clipboard.writeText(txt)
-        .then(() => { expT.textContent = '✅ تم النسخ'; expT.classList.add('ok'); setTimeout(() => { expT.textContent = '📋 تصدير نص'; expT.classList.remove('ok'); }, 2500); })
-        .catch(() => { expT.textContent = '❌ خطأ'; setTimeout(() => { expT.textContent = '📋 تصدير نص'; }, 2000); });
-    });
-
-    // مسح سجل ETC
-    clrBtn?.addEventListener('click', () => {
-      _etcHistory.length = 0;
-      _etcOffset = 0;
-      const el = W.document.getElementById('cbEtcOffset');
-      const bd = W.document.getElementById('cbEtcBadge');
-      if (el) el.textContent = '0ms';
-      if (bd) { bd.textContent = '0 معايرة'; bd.style.background = '#6b7280'; }
+    // V13: all buttons use window._ globals via inline onclick (reliable on Android)
+    W._cbToggleAnal    = function() { panel.classList.toggle('open'); if (panel.classList.contains('open')) _analRender(); };
+    W._cbCloseAnal     = function() { panel.classList.remove('open'); };
+    W._cbAnalTab       = function(t, el) { panel.querySelectorAll('.cb-anal-tab').forEach(x=>x.classList.remove('active')); if(el) el.classList.add('active'); _analCurrentTab=t; _analRender(); };
+    W._cbAnalExportJson = function() {
+      const json=_analExportJSON();
+      navigator.clipboard.writeText(json).then(()=>{if(expJ){expJ.textContent='✅ تم النسخ';expJ.classList.add('ok');setTimeout(()=>{expJ.textContent='📤 تصدير JSON';expJ.classList.remove('ok');},2500);}}).catch(()=>{if(expJ){expJ.textContent='❌ خطأ';setTimeout(()=>{expJ.textContent='📤 تصدير JSON';},2000);}});
+    };
+    W._cbAnalExportTxt = function() {
+      const txt=_analExportText();
+      navigator.clipboard.writeText(txt).then(()=>{if(expT){expT.textContent='✅ تم النسخ';expT.classList.add('ok');setTimeout(()=>{expT.textContent='📋 تصدير نص';expT.classList.remove('ok');},2500);}}).catch(()=>{if(expT){expT.textContent='❌ خطأ';setTimeout(()=>{expT.textContent='📋 تصدير نص';},2000);}});
+    };
+    W._cbAnalClear = function() {
+      _etcHistory.length=0; _etcOffset=0;
+      const el=W.document.getElementById('cbEtcOffset'), bd=W.document.getElementById('cbEtcBadge');
+      if(el) el.textContent='0ms';
+      if(bd) { bd.textContent='0 معايرة'; bd.style.background='#6b7280'; }
       _analRender();
-    });
+    };
 
     // تحديث تلقائي كل 5 ثوانٍ إذا مفتوح
     setInterval(() => {
@@ -5257,6 +5235,51 @@
     }).join('');
   }
 
+  // ── V13: window-exposed log functions — onclick on mobile is reliable,
+  //         addEventListener('click') can be swallowed on Android WebView  ──
+  W._cbToggleLog = function() {
+    const lf = W.document.getElementById('cbLogFloat');
+    if (!lf) return;
+    lf.classList.toggle('open');
+    if (lf.classList.contains('open')) renderLog();
+  };
+  W._cbCloseLog = function() {
+    const lf = W.document.getElementById('cbLogFloat');
+    if (lf) lf.classList.remove('open');
+  };
+  W._cbCopyLog = function() {
+    const btn = W.document.getElementById('cbLogCopy');
+    const header = ['══════════════════════════════════════════',
+      '  سجل البوت V13 — ' + new Date().toLocaleString('ar'),
+      '  الزوج: '+(activeAsset||'–')+' | الفريم: '+(candlePeriod?fmtDur(candlePeriod):'؟'),
+      '  فوز: '+STATS.wins+' | خسارة: '+STATS.losses+' | معدل: '+winRate()+'%',
+      '══════════════════════════════════════════'].join('\n');
+    const body = logLines.slice().reverse().map(l =>
+      '#'+String(l.seq).padStart(4,'0')+' ['+l.t+'] ['+l.type.toUpperCase().padEnd(6)+'] '+l.msg+(l.extra?' ← '+l.extra:'')
+    ).join('\n');
+    navigator.clipboard.writeText(header+'\n'+body)
+      .then(()=>{ if(btn){btn.textContent='✅ تم النسخ';btn.classList.add('copy-ok');setTimeout(()=>{btn.textContent='📋 نسخ';btn.classList.remove('copy-ok');},2500);} })
+      .catch(()=>{ if(btn){btn.textContent='❌ خطأ';setTimeout(()=>{btn.textContent='📋 نسخ';},2000);} });
+  };
+  W._cbPauseLog = function() {
+    _logPaused = !_logPaused;
+    const btn = W.document.getElementById('cbLogPause');
+    if (btn) { btn.textContent = _logPaused ? '▶ استئناف' : '⏸ وقفة'; btn.classList.toggle('pause-on', _logPaused); }
+    if (!_logPaused) renderLog();
+  };
+  W._cbClearLog = function() {
+    if (!W.confirm('مسح السجل؟')) return;
+    logLines = []; _logSeq = 0; renderLog();
+    addLog('🗑 السجل مُمسح', 'info');
+  };
+  W._cbLogFilter = function(type, btn) {
+    _logFilter = type;
+    W.document.querySelectorAll('.cb-log-filter').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    renderLog();
+  };
+
+
   function renderCandleRow() {
     const el=W.document.getElementById('cbCandleRow'); if(!el||!activeAsset) return;
     const candles=(candleBuffers[activeAsset]||[]).slice(-8);
@@ -5363,76 +5386,8 @@
       });
     }
 
-    const logTogBtn=W.document.getElementById('cbLogToggle'), logFloat=W.document.getElementById('cbLogFloat'), logClose=W.document.getElementById('cbLogClose');
-    if (logTogBtn&&logFloat) logTogBtn.addEventListener('click', () => {
-      logFloat.classList.toggle('open');
-      if (logFloat.classList.contains('open')) renderLog(); // V13: render on open
-    });
-    if (logClose&&logFloat)  logClose.addEventListener('click',  ()=>logFloat.classList.remove('open'));
-
-    // V13: Timing offset — render initial value (buttons use window._cbAdjTiming via onclick)
-    _cbAdjTiming(0);
-    // v12.7: init SPY panel
-    _initSpyPanel();
-    // HYBRID: init Analysis panel
-    _initAnalPanel();
-
-    // ✅ v10.8: زر نسخ السجل الكامل
-    const logCopyBtn = W.document.getElementById('cbLogCopy');
-    if (logCopyBtn) {
-      logCopyBtn.addEventListener('click', () => {
-        const header = [
-          '══════════════════════════════════════════',
-          '  سجل البوت v10.8 — ' + new Date().toLocaleString('ar'),
-          '  الزوج: '+(activeAsset||'–')+' | الفريم: '+(candlePeriod?fmtDur(candlePeriod):'؟'),
-          '  فوز: '+STATS.wins+' | خسارة: '+STATS.losses+' | معدل: '+winRate()+'%',
-          '══════════════════════════════════════════',
-        ].join('\n');
-        const body = logLines.slice().reverse().map(l =>
-          '#' + String(l.seq).padStart(4,'0') +
-          ' [' + l.t + '] ' +
-          '[' + l.type.toUpperCase().padEnd(6) + '] ' +
-          l.msg +
-          (l.extra ? ' ← ' + l.extra : '')
-        ).join('\n');
-        const full = header + '\n' + body;
-        navigator.clipboard.writeText(full)
-          .then(()=>{ logCopyBtn.textContent='✅ تم النسخ'; logCopyBtn.classList.add('copy-ok'); setTimeout(()=>{ logCopyBtn.textContent='📋 نسخ'; logCopyBtn.classList.remove('copy-ok'); },2500); })
-          .catch(()=>{ logCopyBtn.textContent='❌ خطأ'; setTimeout(()=>{ logCopyBtn.textContent='📋 نسخ'; },2000); });
-      });
-    }
-
-    // ✅ v10.8: زر إيقاف/استئناف عرض السجل
-    const logPauseBtn = W.document.getElementById('cbLogPause');
-    if (logPauseBtn) {
-      logPauseBtn.addEventListener('click', () => {
-        _logPaused = !_logPaused;
-        logPauseBtn.textContent = _logPaused ? '▶ استئناف' : '⏸ وقفة';
-        logPauseBtn.classList.toggle('pause-on', _logPaused);
-        if (!_logPaused) renderLog();
-      });
-    }
-
-    // ✅ v10.8: زر مسح السجل
-    const logClearBtn = W.document.getElementById('cbLogClear');
-    if (logClearBtn) {
-      logClearBtn.addEventListener('click', () => {
-        if (!confirm('مسح السجل؟')) return;
-        logLines = []; _logSeq = 0; renderLog();
-        addLog('🗑 السجل مُمسح', 'info');
-      });
-    }
-
-    // ✅ v10.8: أزرار الفلتر
-    const filterBtns = W.document.querySelectorAll('.cb-log-filter');
-    filterBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        _logFilter = btn.dataset.filter || 'all';
-        filterBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        renderLog();
-      });
-    });
+    // V13: Log + timing buttons use window._ globals + inline onclick (reliable on Android)
+    _cbAdjTiming(0); // render initial timing value
 
     // v12.11 [DB] GitHub token input + manual sync button
     const ghTokenInp = W.document.getElementById('cbGhToken');
