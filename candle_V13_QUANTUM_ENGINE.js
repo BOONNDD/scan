@@ -2708,7 +2708,15 @@
     if (tickBuffers[a].length > 600) tickBuffers[a].shift();
     // V13: OBI + LAD + LSTM tick hooks
     if (CFG.OBI_ENABLED) OBIEngine.update(a, price);
-    if (CFG.LAD_ENABLED) LADEngine.recordTick(a, price, serverTs || Date.now());
+    if (CFG.LAD_ENABLED) {
+      LADEngine.recordTick(a, price, serverTs || Date.now());
+      const _ladBadge = W.document.getElementById('cbLadBadge');
+      if (_ladBadge) {
+        const _delta = LADEngine.getServerDelta();
+        _ladBadge.textContent = 'Δsrv: ' + (_delta >= 0 ? '+' : '') + _delta + 'ms';
+        _ladBadge.style.background = Math.abs(_delta) > 100 ? '#b45309' : '#1E3A2F';
+      }
+    }
     if (CFG.LSTM_ENABLED) LSTMProxy.push(price);
     totalTicks++;
     if (!activeAsset) onActiveAsset(a, 'firstTick');
@@ -3418,7 +3426,8 @@
     if (confScore >= CFG.SEE_CONF_HIGH)      ratio = CFG.SEE_RATIO_HIGH;
     else if (confScore >= CFG.SEE_CONF_MED)  ratio = CFG.SEE_RATIO_MED;
     else                                     ratio = CFG.SEE_RATIO_LOW;
-    const earlyMs = Math.round(periodMs * ratio) + _timingOffset;
+    // _timingOffset = manual HUD control, ELACEngine.getBias() = auto pipeline lag
+    const earlyMs = Math.round(periodMs * ratio) + _timingOffset + ELACEngine.getBias();
     const clamped = Math.min(Math.max(earlyMs, CFG.SEE_MIN_MS), CFG.SEE_MAX_MS);
     // لا تدخل مبكراً أكثر من 62% من الفريم — نضمن وجود شمعة سابقة للتحليل
     return Math.min(clamped, Math.round(periodMs * 0.62));
@@ -3442,13 +3451,18 @@
   function schedulePredictiveEntry() {
     if (!fastCloseAt || !autoTrade) return;
     // SUPREME-PRED v2 [SEE]: احسب وقت الدخول المبكر حسب spConf
-    const confScore = _PS.spConf ?? 0;
-    const earlyMs   = getSmartEarlyMs(confScore);
-    const fireAt    = fastCloseAt - earlyMs;
-    const now       = Date.now();
+    const confScore  = _PS.spConf ?? 0;
+    const earlyMs    = getSmartEarlyMs(confScore);
+    // Server-delta compensation: if server clock leads local by Δms, the
+    // real candle close happens Δms earlier in local time → fire Δms sooner.
+    const serverAdj  = CFG.LAD_ENABLED ? LADEngine.getServerDelta() : 0;
+    const fireAt     = fastCloseAt - earlyMs - serverAdj;
+    const now        = Date.now();
     if (fireAt <= now + 15) return;
-    addLog('[SEE] 📅 دخول مبكر: '+(earlyMs/1000).toFixed(2)+'ث قبل الإغلاق | SP:'+confScore.toFixed(0)+'%', 'info');
+    ELACEngine.setIntended(fireAt); // record intended time before RAF overhead
+    addLog('[SEE] 📅 دخول مبكر: '+(earlyMs/1000).toFixed(2)+'ث قبل الإغلاق | SP:'+confScore.toFixed(0)+'%'+(serverAdj?' | Δsrv:'+serverAdj+'ms':''), 'info');
     scheduleExactExecution(fireAt, () => {
+      ELACEngine.recordFire(); // measure actual vs intended — feeds future bias
       PERF.mark('schedFired');
       if (!autoTrade || !_readySignal) return;
       const a = _readySignal.asset || activeAsset;
@@ -3505,6 +3519,43 @@
       if (el) { el.textContent=this.lastTotal+'ms ⚡'; el.style.color='#00d264'; }
     },
   };
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § 24.5  ELAC — Execution Latency Auto-Calibrator
+  // Measures the gap between intended fire time (SEE schedule) and actual
+  // execution time (RAF callback). Feeds a signed bias into getSmartEarlyMs
+  // so future entries fire earlier by exactly the observed pipeline delay.
+  // ══════════════════════════════════════════════════════════════════════
+  const ELACEngine = (() => {
+    const MAX_CAP  = 250;   // bias clamped to ±250ms
+    const ALPHA    = 0.20;  // EMA α — fast enough to adapt, slow enough to be stable
+    let _biasEma   = 0;
+    let _sampleN   = 0;
+    let _intendedFireAt = 0; // set just before scheduleExactExecution
+
+    function setIntended(ts) { _intendedFireAt = ts; }
+
+    function recordFire() {
+      if (!_intendedFireAt) return;
+      const delay = Date.now() - _intendedFireAt; // +ve = fired late
+      _intendedFireAt = 0;
+      if (delay < 0 || delay > 500) return;       // ignore outliers
+      _sampleN++;
+      _biasEma = _sampleN === 1 ? delay : _biasEma * (1 - ALPHA) + delay * ALPHA;
+      // Update HUD display
+      const el = W.document.getElementById('cbElacVal');
+      if (el) el.textContent = '+' + Math.round(_biasEma) + 'ms';
+    }
+
+    // Returns ms to add to earlyMs so the next entry fires this much sooner,
+    // compensating for the measured pipeline lag.
+    function getBias() {
+      if (_sampleN < 3) return 0; // not enough samples
+      return Math.min(MAX_CAP, Math.max(-MAX_CAP, Math.round(_biasEma)));
+    }
+
+    return { setIntended, recordFire, getBias };
+  })();
 
   // ══════════════════════════════════════════════════════════════════════
   // § 25  محرك الاستراتيجية — 35+ نمط
@@ -3899,6 +3950,23 @@
       const _spConfNow = _PS.spConf ?? 0;
       const a = _readySignal.asset || activeAsset;
       if (!dir || !a) return;
+
+      // ── [WATCH-SEE] Coordination Gate ─────────────────────────────────
+      // If SEE has a precision-scheduled execution pending, stand down — the
+      // RAF-based scheduler will fire at the exact optimal candle moment.
+      // Only execute immediately when: (a) no fastCloseAt known, OR
+      // (b) we are already inside/past the SEE window (<= earlyMs from close).
+      if (_predictiveTimer !== null || _predictiveRAF !== null) return;
+      if (fastCloseAt) {
+        const _msLeft  = fastCloseAt - now;
+        const _earlyMs = getSmartEarlyMs(_spConfNow);
+        if (_msLeft > _earlyMs + 50) {
+          // Still well before the entry window — schedule SEE and stand down
+          schedulePredictiveEntry();
+          return;
+        }
+        // Within or past the SEE window — fall through to immediate execution
+      }
 
       addLog('[WATCH⚡] تنفيذ: ' + dir + ' | ثقة:' + _spConfNow + '%', 'signal');
       _pendingIsTVE = _readySignal?.isTVE === true;  // احفظ قبل المسح
@@ -4411,6 +4479,11 @@
         <span class="cb-ind-lbl">🎯 ETC</span>
         <span class="cb-ind-val" id="cbEtcOffset">0ms</span>
         <span class="cb-ind-badge" id="cbEtcBadge" style="background:#1E3A2F;color:#fff">0 معايرة</span>
+      </div>
+      <div class="cb-ind-row" title="ELAC — تعويض تأخير خط التنفيذ تلقائياً">
+        <span class="cb-ind-lbl">📡 ELAC</span>
+        <span class="cb-ind-val" id="cbElacVal">جمع…</span>
+        <span class="cb-ind-badge" id="cbLadBadge" style="background:#1E3A2F;color:#fff">LAD: –</span>
       </div>
       <div class="cb-ind-row">
         <span class="cb-ind-lbl">TVE σ</span>
@@ -7534,20 +7607,31 @@
   // V13 §C  LATENCY ARBITRAGE DETECTOR (LAD)
   // ════════════════════════════════════════════════════════════════════════════
   const LADEngine = (() => {
-    let _lastDesync = 0;
+    let _lastDesync   = 0;
     let _desyncActive = false;
+    // Signed server-local delta EMA: positive = server clock ahead of local
+    let _deltaEma = 0;
+    let _deltaN   = 0;
     function recordTick(asset, price, serverTs) {
-      const localTs = Date.now();
-      const delta = Math.abs(localTs - serverTs);
-      if (delta > CFG.LAD_DESYNC_THRESHOLD_MS) {
-        _lastDesync = localTs;
-        _desyncActive = true;
+      const localTs     = Date.now();
+      const signedDelta = serverTs - localTs;        // +ve: server ahead
+      const absDelta    = Math.abs(signedDelta);
+      // Update signed EMA with α=0.05 (slow, stable estimate)
+      _deltaN++;
+      _deltaEma = _deltaN === 1 ? signedDelta : _deltaEma * 0.95 + signedDelta * 0.05;
+      // Binary desync flag (unchanged semantics)
+      if (absDelta > CFG.LAD_DESYNC_THRESHOLD_MS) {
+        _lastDesync = localTs; _desyncActive = true;
       } else if (_desyncActive && (localTs - _lastDesync) > 3000) {
         _desyncActive = false;
       }
     }
     function hasDesync() { return _desyncActive; }
-    return { recordTick, hasDesync };
+    // Returns signed server-local delta (ms) once enough samples collected.
+    // If server is 80ms ahead, fastCloseAt should be reduced by 80ms so we
+    // fire 80ms earlier in local time.
+    function getServerDelta() { return _deltaN >= 8 ? Math.round(_deltaEma) : 0; }
+    return { recordTick, hasDesync, getServerDelta };
   })();
 
   // ════════════════════════════════════════════════════════════════════════════
