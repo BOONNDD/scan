@@ -648,6 +648,8 @@
   // § V13 — PRE-CANDLE INJECTION ENGINE
   // ══════════════════════════════════════════════════════════════════════
   const _phantomProcessed  = new Set();  // "asset:candleStartMs" — prevents double-fire
+  // V13: manual timing offset — adjusted from HUD, persisted to localStorage
+  let   _timingOffset = parseInt(W.localStorage.getItem('_cb_timing_offset') || '0', 10) || 0;
   let   _phantomSkipUntil  = 0;          // timestamp: skip injection until accuracy recovers
   let   _phantomWeight     = 1.0;        // confidence multiplier [0.5 – 1.5]
   let   _phantomPendingKey = null;       // key of the candle whose prediction is in-flight
@@ -3403,7 +3405,7 @@
     if (confScore >= CFG.SEE_CONF_HIGH)      ratio = CFG.SEE_RATIO_HIGH;
     else if (confScore >= CFG.SEE_CONF_MED)  ratio = CFG.SEE_RATIO_MED;
     else                                     ratio = CFG.SEE_RATIO_LOW;
-    const earlyMs = Math.round(periodMs * ratio);
+    const earlyMs = Math.round(periodMs * ratio) + _timingOffset;
     const clamped = Math.min(Math.max(earlyMs, CFG.SEE_MIN_MS), CFG.SEE_MAX_MS);
     // لا تدخل مبكراً أكثر من 62% من الفريم — نضمن وجود شمعة سابقة للتحليل
     return Math.min(clamped, Math.round(periodMs * 0.62));
@@ -4237,6 +4239,13 @@
   .cb-toggle:checked{background:#1E3A2F;}
   .cb-toggle:checked::after{transform:translateX(18px);}
   .cb-auto-badge{font-size:10px;font-weight:700;color:#9CA3AF;min-width:28px;text-align:center;}
+  /* ══ TIMING OFFSET ROW ══ */
+  .cb-timing-row{display:flex;align-items:center;gap:6px;padding:4px 10px 8px;}
+  .cb-timing-lbl{font-size:10px;color:#6B7280;flex:1;font-weight:600;}
+  .cb-timing-btn{width:26px;height:26px;border-radius:8px;border:1px solid #E5DDD5;background:#fff;color:#374151;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;flex-shrink:0;touch-action:manipulation;}
+  .cb-timing-btn:hover{background:#F0FDF4;border-color:#86EFAC;color:#16A34A;}
+  .cb-timing-val{font-size:11px;font-weight:700;color:#1E3A2F;min-width:64px;text-align:center;font-family:'SF Mono',ui-monospace,monospace;background:#F8F5F0;border:1px solid #E5DDD5;border-radius:8px;padding:3px 6px;}
+  .cb-timing-val.neg{color:#DC2626;}
   /* ══ UTILITY BUTTONS ══ */
   .cb-reset-btn{display:block;margin:0 10px 8px;padding:8px;border-radius:12px;border:1px solid #E5DDD5;background:#fff;color:#6B7280;font-family:inherit;font-size:9.5px;font-weight:600;cursor:pointer;text-align:center;width:calc(100% - 20px);transition:all 0.15s;}
   .cb-reset-btn:hover{background:#FEF2F2;border-color:#FCA5A5;color:#DC2626;}
@@ -4484,6 +4493,12 @@
         <span class="cb-auto-lbl">تداول تلقائي (CONF≥${CFG.CONFLUENCE_AUTO_MIN})</span>
         <input type="checkbox" class="cb-toggle" id="cbAutoToggle">
         <span class="cb-auto-badge" id="cbAutoBadge">OFF</span>
+      </div>
+      <div class="cb-timing-row">
+        <span class="cb-timing-lbl">⚡ توقيت التنفيذ</span>
+        <button class="cb-timing-btn" id="cbTimingMinus">−</button>
+        <span class="cb-timing-val" id="cbTimingVal">0 ms</span>
+        <button class="cb-timing-btn" id="cbTimingPlus">+</button>
       </div>
       <div style="display:flex;gap:6px;margin:0 10px 8px;">
         <button class="cb-reset-btn" id="cbResetStats" style="margin:0;flex:1;">إعادة تعيين</button>
@@ -5336,8 +5351,34 @@
     }
 
     const logTogBtn=W.document.getElementById('cbLogToggle'), logFloat=W.document.getElementById('cbLogFloat'), logClose=W.document.getElementById('cbLogClose');
-    if (logTogBtn&&logFloat) logTogBtn.addEventListener('click', ()=>logFloat.classList.toggle('open'));
+    if (logTogBtn&&logFloat) logTogBtn.addEventListener('click', () => {
+      logFloat.classList.toggle('open');
+      if (logFloat.classList.contains('open')) renderLog(); // V13: render on open
+    });
     if (logClose&&logFloat)  logClose.addEventListener('click',  ()=>logFloat.classList.remove('open'));
+
+    // V13: Timing offset +/- buttons
+    function _renderTimingVal() {
+      const el = W.document.getElementById('cbTimingVal');
+      if (!el) return;
+      el.textContent = (_timingOffset >= 0 ? '+' : '') + _timingOffset + ' ms';
+      el.classList.toggle('neg', _timingOffset < 0);
+    }
+    _renderTimingVal();
+    const timingMinus = W.document.getElementById('cbTimingMinus');
+    const timingPlus  = W.document.getElementById('cbTimingPlus');
+    if (timingMinus) timingMinus.addEventListener('click', () => {
+      _timingOffset = Math.max(-500, _timingOffset - 50);
+      W.localStorage.setItem('_cb_timing_offset', _timingOffset);
+      _renderTimingVal();
+      addLog('⚡ توقيت التنفيذ: ' + (_timingOffset >= 0 ? '+' : '') + _timingOffset + 'ms', 'info');
+    });
+    if (timingPlus) timingPlus.addEventListener('click', () => {
+      _timingOffset = Math.min(1000, _timingOffset + 50);
+      W.localStorage.setItem('_cb_timing_offset', _timingOffset);
+      _renderTimingVal();
+      addLog('⚡ توقيت التنفيذ: +' + _timingOffset + 'ms', 'info');
+    });
     // v12.7: init SPY panel
     _initSpyPanel();
     // HYBRID: init Analysis panel
