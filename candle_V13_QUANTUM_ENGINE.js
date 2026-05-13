@@ -650,6 +650,19 @@
   const _phantomProcessed  = new Set();  // "asset:candleStartMs" — prevents double-fire
   // V13: manual timing offset — adjusted from HUD, persisted to localStorage
   let   _timingOffset = parseInt(W.localStorage.getItem('_cb_timing_offset') || '0', 10) || 0;
+
+  // Exposed on window so inline onclick works reliably on Android WebView
+  function _cbAdjTiming(delta) {
+    _timingOffset = Math.max(-500, Math.min(1000, _timingOffset + delta));
+    if (delta !== 0) W.localStorage.setItem('_cb_timing_offset', _timingOffset);
+    const el = W.document.getElementById('cbTimingVal');
+    if (el) {
+      el.textContent = (_timingOffset >= 0 ? '+' : '') + _timingOffset + ' ms';
+      el.classList.toggle('neg', _timingOffset < 0);
+    }
+    if (delta !== 0) addLog('⚡ توقيت التنفيذ: ' + (_timingOffset >= 0 ? '+' : '') + _timingOffset + 'ms', 'info');
+  }
+  W._cbAdjTiming = _cbAdjTiming;
   let   _phantomSkipUntil  = 0;          // timestamp: skip injection until accuracy recovers
   let   _phantomWeight     = 1.0;        // confidence multiplier [0.5 – 1.5]
   let   _phantomPendingKey = null;       // key of the candle whose prediction is in-flight
@@ -4496,9 +4509,9 @@
       </div>
       <div class="cb-timing-row">
         <span class="cb-timing-lbl">⚡ توقيت التنفيذ</span>
-        <button class="cb-timing-btn" id="cbTimingMinus">−</button>
-        <span class="cb-timing-val" id="cbTimingVal">0 ms</span>
-        <button class="cb-timing-btn" id="cbTimingPlus">+</button>
+        <button class="cb-timing-btn" id="cbTimingMinus" onclick="window._cbAdjTiming&&window._cbAdjTiming(-50)">−</button>
+        <span class="cb-timing-val" id="cbTimingVal">+0 ms</span>
+        <button class="cb-timing-btn" id="cbTimingPlus" onclick="window._cbAdjTiming&&window._cbAdjTiming(50)">+</button>
       </div>
       <div style="display:flex;gap:6px;margin:0 10px 8px;">
         <button class="cb-reset-btn" id="cbResetStats" style="margin:0;flex:1;">إعادة تعيين</button>
@@ -5357,28 +5370,8 @@
     });
     if (logClose&&logFloat)  logClose.addEventListener('click',  ()=>logFloat.classList.remove('open'));
 
-    // V13: Timing offset +/- buttons
-    function _renderTimingVal() {
-      const el = W.document.getElementById('cbTimingVal');
-      if (!el) return;
-      el.textContent = (_timingOffset >= 0 ? '+' : '') + _timingOffset + ' ms';
-      el.classList.toggle('neg', _timingOffset < 0);
-    }
-    _renderTimingVal();
-    const timingMinus = W.document.getElementById('cbTimingMinus');
-    const timingPlus  = W.document.getElementById('cbTimingPlus');
-    if (timingMinus) timingMinus.addEventListener('click', () => {
-      _timingOffset = Math.max(-500, _timingOffset - 50);
-      W.localStorage.setItem('_cb_timing_offset', _timingOffset);
-      _renderTimingVal();
-      addLog('⚡ توقيت التنفيذ: ' + (_timingOffset >= 0 ? '+' : '') + _timingOffset + 'ms', 'info');
-    });
-    if (timingPlus) timingPlus.addEventListener('click', () => {
-      _timingOffset = Math.min(1000, _timingOffset + 50);
-      W.localStorage.setItem('_cb_timing_offset', _timingOffset);
-      _renderTimingVal();
-      addLog('⚡ توقيت التنفيذ: +' + _timingOffset + 'ms', 'info');
-    });
+    // V13: Timing offset — render initial value (buttons use window._cbAdjTiming via onclick)
+    _cbAdjTiming(0);
     // v12.7: init SPY panel
     _initSpyPanel();
     // HYBRID: init Analysis panel
