@@ -302,17 +302,36 @@
 
   function build() {
     if (host) return;
-    if (!W.document || !W.document.body) {
-      QR.scheduler.defer(build, 500, 'panel.build.retry');
+    // Prefer body; fall back to documentElement (always present at document-start).
+    const root = (W.document && W.document.body) || (W.document && W.document.documentElement);
+    if (!root) {
+      QR.scheduler.defer(build, 250, 'panel.build.retry');
       return;
     }
     host = W.document.createElement('div');
     host.id = '__qr_ctrl_host__';
     host.appendChild(buildToggleBtn());
     host.appendChild(buildPanel());
-    W.document.body.appendChild(host);
+    root.appendChild(host);
     mounted = true;
     refreshStatus();
+    // Re-parent to body once it becomes available (avoids style isolation issues).
+    if (root !== W.document.body) {
+      const moveToBody = () => {
+        if (W.document.body && host && host.parentNode !== W.document.body) {
+          try { W.document.body.appendChild(host); } catch (_) {}
+        }
+      };
+      try { W.document.addEventListener('DOMContentLoaded', moveToBody, { once: true }); } catch (_) {}
+      QR.scheduler.defer(moveToBody, 1000, 'panel.reparent');
+    }
+    // Open the panel on first ever boot so injection is immediately obvious.
+    try {
+      if (W.localStorage.getItem('QR_PANEL_SEEN') !== '1') {
+        W.localStorage.setItem('QR_PANEL_SEEN', '1');
+        setExpanded(true);
+      }
+    } catch (_) {}
   }
 
   function unmount() {
@@ -337,7 +356,10 @@
     QR.bus.on('execution.resume', () => { halted = false; refreshStatus(); });
     QR.bus.on('pipeline.reject',  (ev) => { if (ev && ev.reason) pushReject(ev.reason, ev.asset); });
     if (isHidden()) return;
-    QR.scheduler.defer(build, 800, 'panel.boot');
+    // Mount immediately on documentElement (always available at @run-at
+    // document-start). Avoids the previous 800ms defer that could race
+    // page-load on slow connections.
+    build();
   }
 
   QR.telemetry = QR.telemetry || {};
