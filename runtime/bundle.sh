@@ -48,6 +48,7 @@ MODULES=(
 
   src/telemetry/hud.js
   src/telemetry/diagnostics.js
+  src/telemetry/control_panel.js
 
   src/recovery/watchdog.js
 )

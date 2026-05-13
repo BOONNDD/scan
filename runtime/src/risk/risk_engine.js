@@ -162,8 +162,25 @@
     });
   }
 
+  function configure(opts) {
+    if (!opts) return;
+    if (Number.isFinite(+opts.kellyMul))     CFG.kellyMul     = Math.max(0.01, Math.min(1.0,  +opts.kellyMul));
+    if (Number.isFinite(+opts.minProbEdge))  CFG.minProbEdge  = Math.max(0.50, Math.min(0.95, +opts.minProbEdge));
+    if (Number.isFinite(+opts.ddCap))        CFG.ddCap        = Math.max(0.05, Math.min(0.80, +opts.ddCap));
+    if (Number.isFinite(+opts.streakCap))    CFG.streakCap    = Math.max(1,    Math.min(20,   +opts.streakCap | 0));
+    QR.bus.emit('risk.configured', getConfig());
+  }
+  function getConfig() {
+    return {
+      kellyMul: CFG.kellyMul, minProbEdge: CFG.minProbEdge,
+      ddCap: CFG.ddCap, streakCap: CFG.streakCap,
+    };
+  }
+  function resetHalt() { state.haltedUntil = 0; }
+
   QR.risk = {
     assess, recordResult, setPayout, getPayout, drawdown,
+    configure, getConfig, resetHalt,
     state: () => ({ ...state, payoutByAsset: undefined }),
     snapshot: () => ({ bankroll: state.bankroll, peak: state.peakBankroll, streak: state.streakLosses }),
     restore: (snap) => {
