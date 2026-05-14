@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚡ V12_SUPREME — SUPREME-PRED v2 | Full Rebuild Engine (v12.16)
-// @namespace    candle-pro-strategy-v12-supreme
-// @version      12.16.0
-// @description  V12.16: Light theme UI redesign — atoma.dev style, responsive mobile/tablet/desktop
+// @name         ⚡ V12_SUPREME_HYBRID — بدون حراس + معايرة التوقيت التلقائية (ETC)
+// @namespace    candle-pro-strategy-v12-supreme-hybrid
+// @version      12.16.1-hybrid
+// @description  HYBRID: لا حراس، لا وقف خسائر — يُعوّض بمعايرة التوقيت التلقائية (ETC)
 // @author       aoirusra
 // @match        *://pocketoption.com/*
 // @match        *://*.pocketoption.com/*
@@ -674,6 +674,86 @@
   let   _lastTradeWasPhantom = false;    // persists after executeTrade for learning discount
   // TVE context flag — persists through _readySignal=null so H5 gets correct threshold
   let   _pendingIsTVE      = false;
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § ETC — Execution Timing Calibrator (HYBRID exclusive)
+  // يقيس التأخير الفعلي بين توليد الإشارة والضغط على الزر
+  // ويعدّل وقت الإطلاق المبكر (pre-fire) تلقائياً بعد كل خسارة عالية الثقة
+  // ══════════════════════════════════════════════════════════════════════
+  let   _etcOffset      = 0;       // ms يُضغط الزر مبكراً (يتراكم بعد خسائر التوقيت)
+  let   _etcPending     = null;    // {signalTs, clickTs, direction, conf, signalPrice, openPrice}
+  let   _etcHistory     = [];      // آخر 30 صفقة [{delay, slippage, win, conf, adj, ts}]
+  const ETC_MAX_HIST    = 30;      // حجم السجل
+  const ETC_CONF_MIN    = 55;      // أدنى ثقة لإجراء معايرة (0-100)
+  const ETC_MAX_OFFSET  = 800;     // أقصى pre-fire بـ ms (حماية من الإفراط)
+  const ETC_DECAY_WIN   = 4;       // تقليص الـ offset بـ 4ms عند كل فوز
+  const ETC_STEP_RATE   = 0.6;     // نسبة التعديل من التأخير عند كل خسارة (0-1)
+
+  function _etcRecordSignal(direction, conf, price) {
+    _etcPending = {
+      signalTs:    performance.now(),
+      direction, conf,
+      signalPrice: price ?? 0,
+      clickTs:     null,
+      openPrice:   null,
+    };
+  }
+
+  function _etcRecordClick() {
+    if (!_etcPending) return;
+    _etcPending.clickTs = performance.now();
+  }
+
+  function _etcStoreOpenPrice(price) {
+    if (_etcPending) _etcPending.openPrice = price;
+  }
+
+  function _etcCalibrate(win) {
+    if (!_etcPending) return;
+    const rec   = _etcPending;
+    _etcPending = null;
+    if (rec.clickTs === null) return;  // لم يُسجَّل click
+
+    const delay    = rec.clickTs - rec.signalTs;                       // ms
+    const slippage = rec.openPrice && rec.signalPrice
+                     ? Math.abs(rec.openPrice - rec.signalPrice) * 1e5  // pips × 10
+                     : null;
+
+    let adj = 0;
+    if (!win && rec.conf >= ETC_CONF_MIN && delay > 5) {
+      // خسارة عالية الثقة → زد الـ pre-fire بنسبة من التأخير
+      adj = Math.round(delay * ETC_STEP_RATE);
+      _etcOffset = Math.min(_etcOffset + adj, ETC_MAX_OFFSET);
+      addLog(
+        '⚡ [ETC] خسارة | تأخير=' + delay.toFixed(1) + 'ms' +
+        (slippage !== null ? ' | انزلاق=' + slippage.toFixed(2) + 'pip' : '') +
+        ' | +' + adj + 'ms → offset=' + _etcOffset.toFixed(0) + 'ms',
+        'info'
+      );
+    } else if (win && rec.conf >= ETC_CONF_MIN && _etcOffset > 0) {
+      // فوز عالي الثقة → قلّص الـ offset تدريجياً
+      adj = -ETC_DECAY_WIN;
+      _etcOffset = Math.max(0, _etcOffset - ETC_DECAY_WIN);
+    }
+
+    _etcHistory.push({ delay: +delay.toFixed(1), slippage, win, conf: rec.conf, adj, ts: Date.now() });
+    if (_etcHistory.length > ETC_MAX_HIST) _etcHistory.shift();
+    // تحديث HUD
+    const _eOff = W.document.getElementById('cbEtcOffset');
+    const _eBdg = W.document.getElementById('cbEtcBadge');
+    if (_eOff) _eOff.textContent = _etcOffset.toFixed(0) + 'ms';
+    if (_eBdg) {
+      const cals = _etcHistory.filter(h => h.adj > 0).length;
+      _eBdg.textContent = cals + ' معايرة';
+      _eBdg.style.background = _etcOffset > 200 ? '#b45309' : _etcOffset > 50 ? '#1E3A2F' : '#6b7280';
+    }
+  }
+
+  // أحسب التأخير الفعّال لـ ENTRY_DELAY_MS بعد خصم الـ offset
+  function _etcEffectiveDelay(baseMs) {
+    return Math.max(0, baseMs - _etcOffset);
+  }
+
 
   let _readySignal    = null;
   let _readySignalTs  = 0;
@@ -2486,6 +2566,7 @@
       if (win) addLog('📊 [KELLY] نسبة العائد: ' + Math.round(rawPayout * 100) + '%', 'info');
     }
     recordTrade(win, _lastTradeWasTVE);
+    _etcCalibrate(win); // [ETC] معايرة التوقيت بناءً على النتيجة
     // v12.11 [DB] Persist complete trade record to IndexedDB
     const _rec = _pendingTradeRecord || {};
     _dbPut('trades', {
@@ -2536,6 +2617,7 @@
       _pendingTradeRecord.orderId   = data.id;
       _pendingTradeRecord.openPrice = data.openPrice ?? 0;
     }
+    _etcStoreOpenPrice(data.openPrice ?? null); // [ETC] سجّل سعر الدخول الفعلي
   }
 
   function onBalanceUpdate(data) {
@@ -3071,12 +3153,7 @@
     }
     // شرط الإيقاف العام
     if (_ghostTradeActive || _recalibrating) return;
-    // [v12.3] حارس بيانات البث — لا تتداول على تيكات قديمة
-    if (_streamStalled) { addLog('⛔ [STREAM] CR15 رفض — تدفق متوقف', 'error'); return; }
-    // [v12.3] حارس التقلب — CR15 لا يتداول في أسواق هادئة جداً
-    if (_volatilityState === 'SQUEEZE') { addLog('⛔ [VOL] CR15 رفض — SQUEEZE', 'info'); return; }
-    // [v12.3] وقف الخسائر
-    if (_lossStreakPauseUntil > now) { addLog('⛔ [H1] CR15 محجوب — وقف الخسائر', 'error'); return; }
+    // [HYBRID] بدون حارس تدفق / تقلب / وقف خسائر
 
     // ── الاتجاه المعاكس: صاعدة → بيع | هابطة → شراء ────────────────
     const direction = candle.isBullish ? 'SELL' : 'BUY';
@@ -3109,10 +3186,7 @@
     if (asset !== activeAsset) return;
     if (tradeExec) return;
     // [v12.3] حارس بيانات البث + تقلب + إيقاف الخسائر + وضع الشبح
-    if (_streamStalled) return;
-    if (_volatilityState === 'SQUEEZE') { addLog('⛔ [VOL] CC3 رفض — SQUEEZE', 'info'); return; }
-    if (_ghostTradeActive || _recalibrating) return;
-    if (_lossStreakPauseUntil > Date.now()) return;
+    // [HYBRID] بدون حارس تدفق / تقلب / وقف خسائر
 
     const cc = currentCandles[asset];
     if (!cc || cc.prices.length < 2) return;
@@ -3545,7 +3619,8 @@
   function scheduleWindowEntry(asset, period) {
     if (windowTimer !== null) clearTimeout(windowTimer);
     windowAsset = asset; windowPeriod = period;
-    const delay = (period>0&&period<=15) ? CFG.ENTRY_DELAY_SHORT : CFG.ENTRY_DELAY_MS;
+    const base  = (period>0&&period<=15) ? CFG.ENTRY_DELAY_SHORT : CFG.ENTRY_DELAY_MS;
+    const delay = _etcEffectiveDelay(base); // [ETC] خصم الـ pre-fire offset
     windowTimer = setTimeout(() => { windowTimer=null; onWindowEntry(windowAsset, windowPeriod); }, delay);
   }
 
@@ -3569,14 +3644,9 @@
       _lastTradeWasTVE = false;
       _lastTradePatternCase = result.case;
 
-      // SUPREME-PRED v2: use spConf (0-100) as gate instead of old confluence score
+      // [HYBRID] بدون حاجز ثقة — ينفذ مباشرة عند autoTrade
       const spConfNow = _PS.spConf ?? 0;
-      const regime    = _PS.regime || 'RANGE';
-      const minConf   = regime === 'VOLATILE' ? CFG.SUPREME_VOLATILE_THRESH : CFG.SUPREME_MIN_CONF;
-
-      if (spConfNow < minConf) {
-        addLog('⏸ SUPREME-PRED ثقة منخفضة ('+spConfNow.toFixed(0)+'% < '+minConf+'%) — انتظار', 'info');
-      } else if (autoTrade) {
+      if (autoTrade) {
         // IMDB: حدّد عدد الصفقات حسب SUPREME-PRED spConf
         const imdbTier = getIMDBTier(spConfNow);
         if (imdbTier > 1 && canIMDB(spConfNow)) {
@@ -3617,118 +3687,19 @@
     const bucket = Math.floor(now / 50);
     if (bucket === _subSecondBucket) return;   // صامت — طبيعي جداً
 
-    // حارس 0b: ✅ v12.2 [STREAM-GUARD] منع الدخول على بيانات قديمة
-    if (_streamStalled) {
-      addLog('⛔ [STREAM] التدفق متوقف — رفض الصفقة', 'error');
-      return;
-    }
+    // [HYBRID] حارس 0b/0c/1/2/4/H5 محذوفة — بدون فلاتر، ETC يتولى التعويض
+    // تحديث حالة التقلب للـ HUD فقط (بدون رفض)
+    { const _a0c = direction ? (asset || activeAsset) : activeAsset;
+      if (_a0c) _volatilityState = classifyVolatility(_a0c);
+      _updateVolatilityHUD(_volatilityState); }
+    _pendingIsTVE = false; // مسح العلامة دائماً
 
-    // حارس 0c: ✅ v12.3 [VOL-GATE] فلتر التقلب — يُحدَّث على كل صفقة
-    {
-      const _asset0c = direction ? (asset || activeAsset) : activeAsset;
-      if (_asset0c) _volatilityState = classifyVolatility(_asset0c);
-      _updateVolatilityHUD(_volatilityState);
-      if (_volatilityState === 'SQUEEZE') {
-        addLog('⛔ [VOL] سوق هادئ (SQUEEZE) — رفض الصفقة', 'info');
-        return;
-      }
-      if (_volatilityState === 'EXPLOSIVE' && (_PS.spConf ?? 0) < CFG.SUPREME_VOLATILE_THRESH) {
-        addLog('⛔ [VOL] سوق متقلب (EXPLOSIVE) — يشترط ثقة ≥' + CFG.SUPREME_VOLATILE_THRESH + '%', 'error');
-        return;
-      }
-    }
+    // حارس 3: tradeExec (قيد التنفيذ) — الوحيد المتبقي
+    if (tradeExec) return;
 
-    // حارس 1: وقف الخسائر
-    if (_lossStreakPauseUntil > now) {
-      addLog('⛔ [H1] وقف تلقائي — تبقى '+Math.ceil((_lossStreakPauseUntil-now)/1000)+'ث','error',
-             'streak:'+STATS.lossStreak+'/'+CFG.MAX_LOSS_STREAK);
-      return;
-    }
-
-    // حارس 2: cooldown بين الصفقات (تكيفي — 25% من طول الشمعة)
-    const sinceLastTrade = now - lastTradeMs;
-    if (sinceLastTrade < getAdaptiveCooldown()) {
-      // لا نسجل — طبيعي أن يُطلق TVE عدة مرات
-      return;
-    }
-
-    // حارس 3: tradeExec (قيد التنفيذ) — مع auto-reset safety
-    if (tradeExec) {
-      addLog('⚠ [H3] tradeExec مشغول','info', 'منذ '+(now-lastTradeMs)+'ms');
-      return;
-    }
-
-    // ✅ v10.5: لا قفل lastTradeCandle في SHORT_MODE
     const a = asset || activeAsset;
     if (!a) { addLog('❌ لا زوج نشط','error'); return; }
 
-    // ══ حارس 4: فلتر الاتجاه — TVE يتجاوز WEAK، PAT محجوب بالزخم ══════════
-    // TVE له تيارات تيك خاصة به — لا يُحجب في WEAK، يُحجب فقط في DOWN/UP القوي
-    // PAT في WEAK: يُحجب إلا إذا أكدت آخر 7 تيكات الاتجاه
-    {
-      const _trendCandles = candleBuffers[a] || [];
-      if (_trendCandles.length >= 3) {
-        const _trendNow  = analyzeTrend(_trendCandles);
-        const _h4IsTVE   = _pendingIsTVE === true;  // _pendingIsTVE مُعيَّن قبل الاستدعاء، لم يُمسح بعد (H5 يمسحه)
-        const _tickMom   = _tickMomentumDir(a);
-        // TVE لا يُحجب في الضعيف — TVE يمتلك تأكيد تيك ذاتي (streak×3)
-        const _downBlock = _trendNow.trend === 'DOWN'
-                        || (!_h4IsTVE && _trendNow.trend === 'DN_WEAK' && _tickMom !== 'BUY');
-        const _upBlock   = _trendNow.trend === 'UP'
-                        || (!_h4IsTVE && _trendNow.trend === 'UP_WEAK' && _tickMom !== 'SELL');
-        if (direction === 'BUY' && _downBlock) {
-          addLog('🚫 [H4] رُفض BUY — PAT ('+_trendNow.label+')', 'error',
-                 'شموع:'+_trendCandles.length+' | قوة:'+_trendNow.strength+'%');
-          _readySignal = null;
-          return;
-        }
-        if (direction === 'SELL' && _upBlock) {
-          addLog('🚫 [H4] رُفض SELL — PAT ('+_trendNow.label+')', 'error',
-                 'شموع:'+_trendCandles.length+' | قوة:'+_trendNow.strength+'%');
-          _readySignal = null;
-          return;
-        }
-      }
-    }
-    // ══════════════════════════════════════════════════════════════════
-  // ══ Guard H5: APEX-PRED consensus filter ════════════════════════════════
-  // ══ Guard H5: SUPREME-PRED v2 — حاجز الثقة الصارم ≥ 70% ═══════════════
-  // الحاجز الرئيسي للتنفيذ: ثقة SUPREME-PRED يجب أن تكون >= 70%
-  {
-    const _spConf = _PS.spConf ?? 0;        // ثقة SUPREME-PRED (0-100%)
-    const _spDir  = _PS.direction ?? 'NEUTRAL';
-    const _regime = _PS.snap?.regime ?? 'RANGE';
-    const _regBlocked = _PS.regimeBlocked?.[_regime] ?? false;
-
-    // TVE يحمل 3+ تيكات متتالية — يحق له عتبة أدنى بـ 7%
-    // _pendingIsTVE يُحفظ في كل مسارات الاستدعاء قبل مسح _readySignal
-    const _isTVE = _pendingIsTVE === true || _readySignal?.isTVE === true;
-    _pendingIsTVE = false;  // امسح بعد القراءة
-    const _minConfThreshold = _regime === 'VOLATILE'
-      ? CFG.SUPREME_VOLATILE_THRESH
-      : (_isTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_MIN_CONF);
-
-    const _supremeOk = (_spDir === direction || _spDir === 'NEUTRAL')
-                       && _spConf >= _minConfThreshold
-                       && !_regBlocked;
-
-    if (!_supremeOk) {
-      const _reason = _regBlocked
-        ? 'نظام ' + _regime + ' محجوب'
-        : _spConf < _minConfThreshold
-          ? 'ثقة ' + _spConf + '% < ' + _minConfThreshold + '%'
-          : 'اتجاه عكسي: ' + _spDir + ' vs ' + direction;
-      addLog(
-        '🔴 [H5] SUPREME-PRED رفض ' + direction + ' — ' + _reason,
-        'error',
-        'regime:' + _regime + ' H:' + (_PS.hurst_h?.toFixed(2) ?? '?') +
-        ' gA:' + (_PS.snap?.gA?.toFixed(2) ?? '?') + ' gB:' + (_PS.snap?.gB?.toFixed(2) ?? '?')
-      );
-      _readySignal = null;
-      return;
-    }
-  }
-  // ════════════════════════════════════════════════════════════════════════
     const isShortNow = (candlePeriod > 0 && candlePeriod <= 15) ||
                        (candlePeriod === 0 && CFG.SHORT_MODE_ASSUME);
     if (!CFG.SHORT_MODE_NO_CANDLE_LOCK || !isShortNow) {
@@ -3784,7 +3755,11 @@
 
     // ✅ تنفيذ الصفقة عبر زر المنصة فقط
     _ghostExecPacket = null;
+    // [ETC] سجّل لحظة الإشارة قبل الضغط
+    const _etcCurPrice = (tickBuffers[a] ?? []);
+    _etcRecordSignal(direction, _PS.spConf ?? 0, _etcCurPrice[_etcCurPrice.length - 1] ?? null);
     success = clickTradeButton(direction);
+    if (success) _etcRecordClick(); // [ETC] سجّل لحظة الضغط الفعلي
     addLog(success ? '🖱 زر المنصة ✓' : '❌ الزر غير موجود — تحقق من الصفحة!', success ? 'info' : 'error');
     if (success) {
       PERF.mark('orderSent'); PERF.report();
@@ -3860,67 +3835,15 @@
         _readySignal = null; return;
       }
 
-      // ── [WATCH-2] إعادة تقييم SUPREME-PRED قبل التنفيذ ──────────────
-      // TVE عتبة الإلغاء 63% بدل 65% (نفس عتبة H5 للـ TVE)
-      const _spConfNow = _PS.spConf ?? 0;
-      const _w2IsTVE   = _readySignal?.isTVE === true;
-      const _cancelThr = _w2IsTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_CANCEL_CONF;
-      if (_spConfNow < _cancelThr) {
-        addLog('[WATCH] 🔴 ثقة انخفضت ' + _spConfNow + '% < ' + _cancelThr + '% — إلغاء', 'info');
-        _readySignal = null; return;
-      }
-
-      // ── [WATCH-3] فحص تغيير الاتجاه منذ توليد الإشارة ───────────────
-      const dir = _readySignal.signal;
-      const _spDirNow = _PS.direction;
-      if (_spDirNow !== 'NEUTRAL' && _spDirNow !== dir) {
-        addLog('[WATCH] 🔄 اتجاه تغيّر: ' + dir + ' → ' + _spDirNow + ' — إلغاء', 'info');
-        _readySignal = null; return;
-      }
-
-      // ── فحص الكولداون والحواجز الأخرى ───────────────────────────────
-      if ((now - lastTradeMs) < getAdaptiveCooldown()) return;
+      // [HYBRID] WATCH-2/3/4/5 محذوفة — بدون فلاتر
+      // فقط tradeExec لمنع الصفقة المزدوجة
       if (tradeExec) return;
-      if (_lossStreakPauseUntil > now) return;
-      const isShortWatcher = (candlePeriod > 0 && candlePeriod <= 15) ||
-                             (candlePeriod === 0 && CFG.SHORT_MODE_ASSUME);
-      if (!isShortWatcher && _pendingTradeExpiry > now) return;
-
+      const dir = _readySignal.signal;
+      const _spConfNow = _PS.spConf ?? 0;
       const a = _readySignal.asset || activeAsset;
       if (!dir || !a) return;
 
-      // ── [WATCH-4] فلتر الاتجاه — TVE يتجاوز WEAK ────────────────────
-      const _wCandles = candleBuffers[a] || [];
-      if (_wCandles.length >= 3) {
-        const _wTrend    = analyzeTrend(_wCandles);
-        const _w4IsTVE   = _readySignal?.isTVE === true;
-        const _wTickMom  = _tickMomentumDir(a);
-        const _wDownBlk  = _wTrend.trend === 'DOWN'
-                        || (!_w4IsTVE && _wTrend.trend === 'DN_WEAK' && _wTickMom !== 'BUY');
-        const _wUpBlk    = _wTrend.trend === 'UP'
-                        || (!_w4IsTVE && _wTrend.trend === 'UP_WEAK' && _wTickMom !== 'SELL');
-        if (dir === 'BUY' && _wDownBlk) {
-          addLog('[WATCH] 🚫 BUY في هبوط — مُلغاة (' + _wTrend.label + ')', 'error');
-          _readySignal = null; return;
-        }
-        if (dir === 'SELL' && _wUpBlk) {
-          addLog('[WATCH] 🚫 SELL في صعود — مُلغاة (' + _wTrend.label + ')', 'error');
-          _readySignal = null; return;
-        }
-      }
-
-      // ── [WATCH-5] تحقق نهائي من SUPREME-PRED ──────────────────────────
-      const _regime = _PS.snap?.regime ?? 'RANGE';
-      const _wIsTVE = _readySignal?.isTVE === true;
-      const _minConf = _regime === 'VOLATILE'
-        ? CFG.SUPREME_VOLATILE_THRESH
-        : (_wIsTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_MIN_CONF);
-      if (_spConfNow < _minConf) {
-        addLog('[WATCH] 🔴 ثقة غير كافية ' + _spConfNow + '% < ' + _minConf + '% — إلغاء', 'error');
-        _readySignal = null; return;
-      }
-
-      addLog('[WATCH⚡] SUPREME: ' + _spConfNow + '% | تنفيذ: ' + dir, 'signal');
+      addLog('[WATCH⚡] تنفيذ: ' + dir + ' | ثقة:' + _spConfNow + '%', 'signal');
       _pendingIsTVE = _readySignal?.isTVE === true;  // احفظ قبل المسح
       _readySignal = null;
       executeTrade(dir, a);
@@ -3950,47 +3873,14 @@
     if (!_readySignal || !autoTrade) return;
     const now = Date.now();
     if ((now - _readySignalTs) > CFG.SIGNAL_WATCHER_EXPIRY_MS) { _readySignal = null; return; }
-    if ((now - lastTradeMs) < getAdaptiveCooldown()) return;
+    // [HYBRID] بدون cooldown / lossStreak / H4 / H5 — فقط tradeExec
     if (tradeExec) return;
-    if (_lossStreakPauseUntil > now) return;
-    // ✅ نفس شرط _pendingTradeExpiry من Signal Watcher
-    const isShortFire = (candlePeriod > 0 && candlePeriod <= 15) ||
-                        (candlePeriod === 0 && CFG.SHORT_MODE_ASSUME);
-    if (!isShortFire && _pendingTradeExpiry > now) return;
     const dir = _readySignal.signal;
     const a   = _readySignal.asset || activeAsset;
     if (!dir || !a) return;
-    // فلتر الاتجاه — TVE يتجاوز WEAK (نفس منطق WATCH-4)
-    const _fCandles = candleBuffers[a] || [];
-    if (_fCandles.length >= 3) {
-      const _fTrend    = analyzeTrend(_fCandles);
-      const _fIsTVEH4  = _readySignal?.isTVE === true;
-      const _fTickMom  = _tickMomentumDir(a);
-      const _fDownBlk  = _fTrend.trend === 'DOWN'
-                      || (!_fIsTVEH4 && _fTrend.trend === 'DN_WEAK' && _fTickMom !== 'BUY');
-      const _fUpBlk    = _fTrend.trend === 'UP'
-                      || (!_fIsTVEH4 && _fTrend.trend === 'UP_WEAK' && _fTickMom !== 'SELL');
-      if (dir === 'BUY' && _fDownBlk)  { addLog('[IMM] 🚫 BUY في هبوط — مُلغاة ('+_fTrend.label+')', 'error'); _readySignal = null; return; }
-      if (dir === 'SELL' && _fUpBlk)   { addLog('[IMM] 🚫 SELL في صعود — مُلغاة ('+_fTrend.label+')', 'error'); _readySignal = null; return; }
-    }
-    // SUPREME-PRED gate — re-check confidence before deferred fire
-    const _immSpConf = _PS.spConf ?? 0;
-    const _immRegime = _PS.regime || 'RANGE';
-    const _immIsTVE = _readySignal?.isTVE === true;
-    const _immMin   = _immRegime === 'VOLATILE'
-      ? CFG.SUPREME_VOLATILE_THRESH
-      : (_immIsTVE ? Math.max(40, CFG.SUPREME_MIN_CONF - 30) : CFG.SUPREME_MIN_CONF);
-    if (_immSpConf < CFG.SUPREME_CANCEL_CONF) {
-      addLog('[IMM] 🚫 SUPREME-PRED ثقة سقطت ('+_immSpConf.toFixed(0)+'%) — مُلغاة', 'error');
-      _readySignal = null; return;
-    }
-    if (_immSpConf < _immMin) {
-      addLog('[IMM] 🚫 SUPREME-PRED دون عتبة '+_immMin+'% ('+_immSpConf.toFixed(0)+'%) — مُلغاة', 'error');
-      _readySignal = null; return;
-    }
-    addLog('[IMM⚡] تنفيذ فوري بعد رفع القفل: '+dir, 'signal');
-    _pendingIsTVE = _immIsTVE;  // احفظ قبل المسح
-    _readySignal = null;  // ✅ v10.10.2: امسح قبل التنفيذ — يمنع WATCH من الإطلاق المزدوج
+    addLog('[IMM⚡] تنفيذ فوري: '+dir, 'signal');
+    _pendingIsTVE = _readySignal?.isTVE === true;
+    _readySignal = null;
     executeTrade(dir, a);
   }
 
@@ -4393,6 +4283,33 @@
   #cbSpyBtn{position:fixed;bottom:100px;right:8px;z-index:2147483646;padding:6px 12px;border-radius:20px;background:#fff;border:1px solid #D1E8DC;color:#1E3A2F;font-family:'IBM Plex Sans Arabic',-apple-system,sans-serif;font-size:9px;font-weight:700;cursor:pointer;touch-action:manipulation;display:none;align-items:center;gap:5px;box-shadow:0 2px 8px rgba(30,58,47,0.10);}
   #cbSpyBtn.visible{display:flex;}
   #cbSpyCount{background:#F0FDF4;color:#16A34A;border-radius:10px;padding:1px 6px;font-size:7.5px;min-width:16px;text-align:center;border:1px solid #86EFAC;}
+  /* ══ ANALYSIS PANEL ══ */
+  #cbAnalBtn{position:fixed;bottom:132px;right:8px;z-index:2147483646;padding:6px 12px;border-radius:20px;background:#1E3A2F;border:1px solid #2d5c45;color:#fff;font-family:'IBM Plex Sans Arabic',-apple-system,sans-serif;font-size:9px;font-weight:700;cursor:pointer;touch-action:manipulation;display:flex;align-items:center;gap:5px;box-shadow:0 2px 8px rgba(30,58,47,0.25);}
+  #cbAnalCount{background:rgba(255,255,255,0.2);color:#fff;border-radius:10px;padding:1px 6px;font-size:7.5px;min-width:16px;text-align:center;}
+  #cbAnalPanel{position:fixed;bottom:80px;right:8px;width:380px;max-width:calc(100vw - 16px);max-height:calc(100svh - 100px);background:#fff;border:1.5px solid #D1E8DC;border-radius:16px;box-shadow:0 8px 32px rgba(30,58,47,0.15);display:none;flex-direction:column;overflow:hidden;z-index:2147483645;touch-action:none;direction:rtl;}
+  #cbAnalPanel.open{display:flex;}
+  @media(max-width:480px){#cbAnalPanel{width:calc(100vw - 16px);right:8px;}}
+  #cbAnalHdr{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:#1E3A2F;gap:6px;flex-shrink:0;}
+  .cb-anal-title{color:#fff;font-size:10px;font-weight:700;flex:1;}
+  .cb-anal-hdr-btns{display:flex;gap:4px;}
+  .cb-anal-hbtn{background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);color:#fff;border-radius:6px;padding:3px 7px;font-size:8px;cursor:pointer;white-space:nowrap;font-family:inherit;}
+  .cb-anal-hbtn:hover{background:rgba(255,255,255,0.28);}
+  .cb-anal-hbtn.ok{background:#16A34A;border-color:#16A34A;}
+  #cbAnalSummary{padding:8px 10px;background:#F0FDF4;border-bottom:1px solid #D1FAE5;font-size:9px;color:#065F46;font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;line-height:1.6;}
+  .cb-anal-tabs{display:flex;gap:0;border-bottom:1px solid #E5DDD5;flex-shrink:0;background:#F8F5F0;}
+  .cb-anal-tab{flex:1;padding:6px 4px;font-size:9px;font-weight:600;border:none;background:transparent;color:#6B7280;cursor:pointer;border-bottom:2px solid transparent;font-family:inherit;}
+  .cb-anal-tab.active{color:#1E3A2F;border-bottom-color:#1E3A2F;background:#fff;}
+  #cbAnalBody{flex:1;overflow-y:auto;font-size:8px;font-family:'SF Mono',ui-monospace,monospace;}
+  .cb-anal-table{width:100%;border-collapse:collapse;}
+  .cb-anal-table th{position:sticky;top:0;background:#F8F5F0;color:#374151;font-size:7.5px;font-weight:700;padding:4px 5px;border-bottom:1px solid #E5DDD5;text-align:center;white-space:nowrap;}
+  .cb-anal-table td{padding:4px 5px;border-bottom:1px solid #F3EEE8;color:#374151;text-align:center;white-space:nowrap;cursor:pointer;}
+  .cb-anal-table tr:hover td{background:#F0FDF4;}
+  .cb-anal-table tr.win td{background:#F0FDF4;}
+  .cb-anal-table tr.loss td{background:#FFF1F2;}
+  .cb-anal-table td.up{color:#16A34A;font-weight:700;}
+  .cb-anal-table td.dn{color:#DC2626;font-weight:700;}
+  .cb-anal-table td.adj{color:#D97706;font-weight:700;}
+  .cb-anal-empty{padding:20px;text-align:center;color:#9CA3AF;font-size:9px;}
   `;
 
   const HUD_HTML = `
@@ -4425,6 +4342,11 @@
         <span class="cb-ind-lbl">⚡ كمون</span>
         <span class="cb-ind-val" id="cbPerfVal">–</span>
         <span class="cb-ind-badge" id="cbPsmState">PSM: IDLE</span>
+      </div>
+      <div class="cb-ind-row" id="cbEtcRow" title="Execution Timing Calibrator — يعدّل وقت الإطلاق تلقائياً">
+        <span class="cb-ind-lbl">🎯 ETC</span>
+        <span class="cb-ind-val" id="cbEtcOffset">0ms</span>
+        <span class="cb-ind-badge" id="cbEtcBadge" style="background:#1E3A2F;color:#fff">0 معايرة</span>
       </div>
       <div class="cb-ind-row">
         <span class="cb-ind-lbl">TVE σ</span>
@@ -4581,6 +4503,27 @@
     </div>
     <div id="cbSpyScroll"></div>
     <div id="cbSpyStats">إدخالات: 0 | AI: 0 | WR-10s: – | WR-30s: –</div>
+  </div>
+
+  <!-- ═══ HYBRID ANALYSIS PANEL ═══ -->
+  <button id="cbAnalBtn">📊 تحليل <span id="cbAnalCount">0</span></button>
+  <div id="cbAnalPanel">
+    <div id="cbAnalHdr">
+      <span class="cb-anal-title">📊 تحليل ETC — سجل الصفقات التفصيلي</span>
+      <div class="cb-anal-hdr-btns">
+        <button class="cb-anal-hbtn" id="cbAnalExport">📤 تصدير JSON</button>
+        <button class="cb-anal-hbtn" id="cbAnalExportTxt">📋 تصدير نص</button>
+        <button class="cb-anal-hbtn" id="cbAnalClear">🗑 مسح</button>
+        <button class="cb-anal-hbtn" id="cbAnalClose">✕</button>
+      </div>
+    </div>
+    <div id="cbAnalSummary"></div>
+    <div class="cb-anal-tabs">
+      <button class="cb-anal-tab active" data-t="etc">⚡ ETC (${ETC_MAX_HIST})</button>
+      <button class="cb-anal-tab" data-t="log">📋 سجل الصفقات</button>
+      <button class="cb-anal-tab" data-t="pat">🏆 الأنماط</button>
+    </div>
+    <div id="cbAnalBody"></div>
   </div>
   `;
 
@@ -4739,6 +4682,257 @@
     spyHdr?.addEventListener('pointerdown', e => { _dragging=true; _dx=e.clientX-spyPanel.getBoundingClientRect().left; _dy=e.clientY-spyPanel.getBoundingClientRect().top; spyHdr.setPointerCapture(e.pointerId); });
     spyHdr?.addEventListener('pointermove', e => { if(!_dragging) return; spyPanel.style.right='auto'; spyPanel.style.bottom='auto'; spyPanel.style.left=(e.clientX-_dx)+'px'; spyPanel.style.top=(e.clientY-_dy)+'px'; });
     spyHdr?.addEventListener('pointerup', () => _dragging=false);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § HYBRID — Analysis Panel (ETC Journal + Export)
+  // ══════════════════════════════════════════════════════════════════════
+  let _analCurrentTab = 'etc';
+  // سجل الصفقات المفصّل — يملأ كل بيانات الصفقة من DB + ETC
+  const _tradeJournal = []; // [{ts, time, asset, dir, amount, result, profit, openPrice, closePrice, pattern, conf, delay, slippage, etcAdj, etcOffsetAfter}]
+
+  function _analAddTrade(rec) {
+    _tradeJournal.push(rec);
+    if (_tradeJournal.length > 200) _tradeJournal.shift();
+    const badge = W.document.getElementById('cbAnalCount');
+    if (badge) badge.textContent = _tradeJournal.length;
+  }
+
+  function _analSummaryHtml() {
+    const total = STATS.wins + STATS.losses;
+    const wr    = total > 0 ? ((STATS.wins / total) * 100).toFixed(1) : '–';
+    const etcAvgDelay = _etcHistory.length
+      ? (_etcHistory.reduce((s,r) => s + r.delay, 0) / _etcHistory.length).toFixed(1)
+      : '–';
+    const etcLosses = _etcHistory.filter(r => !r.win).length;
+    const etcWins   = _etcHistory.filter(r => r.win).length;
+    return [
+      `فوز: <b>${STATS.wins}</b> | خسارة: <b>${STATS.losses}</b> | معدل: <b>${wr}%</b>`,
+      `ETC offset: <b>${_etcOffset.toFixed(0)}ms</b> | متوسط تأخير: <b>${etcAvgDelay}ms</b> | معايرات: <b>${_etcHistory.filter(r=>r.adj>0).length}</b>`,
+      `ETC wins: <b>${etcWins}</b> | ETC losses: <b>${etcLosses}</b>`,
+    ].join('<br>');
+  }
+
+  function _analRenderEtcTab() {
+    if (_etcHistory.length === 0) return '<div class="cb-anal-empty">لا توجد صفقات بعد — انتظر أول صفقة</div>';
+    let cumulOffset = 0;
+    const rows = _etcHistory.slice().reverse().map(r => {
+      cumulOffset = 0; // نعيد حساب التراكمي
+      const t = new Date(r.ts).toLocaleTimeString('ar');
+      const winCls = r.win ? 'win' : 'loss';
+      const resCls = r.win ? 'up' : 'dn';
+      const adjCls = r.adj > 0 ? 'adj' : '';
+      const slip   = r.slippage !== null && r.slippage !== undefined ? r.slippage.toFixed(1) + 'p' : '–';
+      return `<tr class="${winCls}">
+        <td>${t}</td>
+        <td class="${resCls}">${r.win ? '✅ WIN' : '❌ LOSS'}</td>
+        <td>${r.delay}ms</td>
+        <td>${slip}</td>
+        <td>${r.conf}%</td>
+        <td class="${adjCls}">${r.adj > 0 ? '+' + r.adj : r.adj < 0 ? r.adj : '–'}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="cb-anal-table">
+      <thead><tr>
+        <th>الوقت</th><th>النتيجة</th><th>تأخير</th><th>انزلاق</th><th>ثقة</th><th>تعديل</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function _analRenderLogTab() {
+    // آخر 60 صفقة من logLines (نوع signal/error)
+    const trades = logLines.filter(l => l.type === 'signal' || (l.type === 'error' && l.msg.includes('❌')));
+    if (trades.length === 0) return '<div class="cb-anal-empty">لا توجد صفقات في السجل بعد</div>';
+    const rows = trades.slice(0, 60).map(l => {
+      const isWin  = l.msg.includes('✅');
+      const isFail = l.msg.includes('❌');
+      const cls    = isWin ? 'win' : isFail ? 'loss' : '';
+      const resCls = isWin ? 'up' : isFail ? 'dn' : '';
+      const seq    = String(l.seq).padStart(4,'0');
+      const msg    = l.msg.length > 60 ? l.msg.slice(0,60) + '…' : l.msg;
+      return `<tr class="${cls}" title="${l.msg}" onclick="_analCopyRow(this,'${l.msg.replace(/'/g,"\\'")}')">
+        <td>#${seq}</td>
+        <td>${l.t}</td>
+        <td class="${resCls}" style="text-align:right;max-width:220px;overflow:hidden;text-overflow:ellipsis;">${msg}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="cb-anal-table">
+      <thead><tr><th>#</th><th>الوقت</th><th style="text-align:right">الحدث</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function _analRenderPatTab() {
+    const pats = getTopPatterns(20);
+    if (pats.length === 0) return '<div class="cb-anal-empty">لا يوجد بيانات أنماط بعد</div>';
+    const rows = pats.map(p => {
+      const wr   = (p.wr * 100).toFixed(1);
+      const cls  = p.wr >= 0.56 ? 'win' : p.wr >= 0.50 ? '' : 'loss';
+      const vCls = p.wr >= 0.56 ? 'up' : p.wr < 0.50 ? 'dn' : '';
+      return `<tr class="${cls}">
+        <td style="text-align:right;max-width:140px;overflow:hidden;text-overflow:ellipsis;">${p.name}</td>
+        <td class="${vCls}">${wr}%</td>
+        <td>${p.wins}</td>
+        <td>${p.total - p.wins}</td>
+        <td>${p.total}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="cb-anal-table">
+      <thead><tr><th style="text-align:right">النمط</th><th>WR%</th><th>فوز</th><th>خسارة</th><th>مجموع</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  function _analRender() {
+    const sum  = W.document.getElementById('cbAnalSummary');
+    const body = W.document.getElementById('cbAnalBody');
+    if (sum)  sum.innerHTML  = _analSummaryHtml();
+    if (!body) return;
+    if (_analCurrentTab === 'etc') body.innerHTML = _analRenderEtcTab();
+    else if (_analCurrentTab === 'log') body.innerHTML = _analRenderLogTab();
+    else if (_analCurrentTab === 'pat') body.innerHTML = _analRenderPatTab();
+  }
+
+  // دالة مساعدة لنسخ صف عند الضغط عليه
+  W._analCopyRow = function(el, text) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    const orig = el.style.background;
+    el.style.background = '#D1FAE5';
+    setTimeout(() => { el.style.background = orig; }, 600);
+  };
+
+  function _analExportJSON() {
+    const payload = {
+      exportedAt:  new Date().toISOString(),
+      session: {
+        asset: activeAsset, period: candlePeriod, isDemo,
+        wins: STATS.wins, losses: STATS.losses,
+        winRate: (STATS.wins + STATS.losses > 0
+          ? ((STATS.wins / (STATS.wins + STATS.losses)) * 100).toFixed(2)
+          : null),
+      },
+      etc: {
+        currentOffset: _etcOffset,
+        calibrations: _etcHistory.length,
+        history: _etcHistory,
+      },
+      patterns: getTopPatterns(30).map(p => ({
+        name: p.name, wr: +(p.wr * 100).toFixed(1),
+        wins: p.wins, total: p.total,
+      })),
+      tradeLog: logLines
+        .filter(l => l.type === 'signal' || (l.type === 'error' && l.msg.includes('❌')))
+        .slice(0, 200)
+        .map(l => ({ seq: l.seq, t: l.t, msg: l.msg, type: l.type })),
+    };
+    return JSON.stringify(payload, null, 2);
+  }
+
+  function _analExportText() {
+    const wr = (STATS.wins + STATS.losses > 0
+      ? ((STATS.wins / (STATS.wins + STATS.losses)) * 100).toFixed(1)
+      : '–');
+    const lines = [
+      '══════════════════════════════════════════════════',
+      '  HYBRID Analysis Export — ' + new Date().toLocaleString('ar'),
+      '══════════════════════════════════════════════════',
+      '',
+      '【 ملخص الجلسة 】',
+      '  الزوج  : ' + (activeAsset || '–'),
+      '  الفريم : ' + (candlePeriod ? fmtDur(candlePeriod) : '؟'),
+      '  فوز    : ' + STATS.wins + ' | خسارة: ' + STATS.losses + ' | WR: ' + wr + '%',
+      '  الحساب : ' + (isDemo ? 'ديمو' : '⚠️ حقيقي'),
+      '',
+      '【 ETC — معايرة التوقيت 】',
+      '  offset الحالي  : ' + _etcOffset.toFixed(0) + 'ms',
+      '  عدد المعايرات  : ' + _etcHistory.filter(r => r.adj > 0).length,
+      '  متوسط التأخير  : ' + (_etcHistory.length
+        ? (_etcHistory.reduce((s,r) => s + r.delay, 0) / _etcHistory.length).toFixed(1) + 'ms'
+        : '–'),
+      '',
+      '  الوقت         | نتيجة | تأخير  | انزلاق | ثقة  | تعديل',
+      '  ' + '─'.repeat(56),
+      ..._etcHistory.slice(-20).reverse().map(r => {
+        const t   = new Date(r.ts).toLocaleTimeString('ar');
+        const res = r.win ? 'WIN ✅ ' : 'LOSS❌';
+        const adj = r.adj > 0 ? '+' + r.adj : r.adj < 0 ? String(r.adj) : '  0 ';
+        const slip = r.slippage !== null && r.slippage !== undefined ? r.slippage.toFixed(1) + 'p' : '  – ';
+        return `  ${t.padEnd(13)} | ${res} | ${String(r.delay+'ms').padStart(6)} | ${slip.padStart(6)} | ${String(r.conf+'%').padStart(4)} | ${adj}ms`;
+      }),
+      '',
+      '【 أفضل / أسوأ الأنماط 】',
+      ...getTopPatterns(10).map(p =>
+        `  ${p.name.padEnd(24)} WR:${(p.wr*100).toFixed(1).padStart(5)}%  (${p.wins}/${p.total})`
+      ),
+      '',
+      '【 آخر 30 صفقة من السجل 】',
+      ...logLines
+        .filter(l => l.type === 'signal' || (l.type === 'error' && l.msg.includes('❌')))
+        .slice(0, 30)
+        .map(l => `  [${l.t}] ${l.msg}`),
+      '',
+      '══════════════════════════════════════════════════',
+    ];
+    return lines.join('\n');
+  }
+
+  function _initAnalPanel() {
+    const btn    = W.document.getElementById('cbAnalBtn');
+    const panel  = W.document.getElementById('cbAnalPanel');
+    const closeB = W.document.getElementById('cbAnalClose');
+    const expJ   = W.document.getElementById('cbAnalExport');
+    const expT   = W.document.getElementById('cbAnalExportTxt');
+    const clrBtn = W.document.getElementById('cbAnalClear');
+    if (!btn || !panel) return;
+
+    btn.addEventListener('click', () => {
+      panel.classList.toggle('open');
+      if (panel.classList.contains('open')) _analRender();
+    });
+    closeB?.addEventListener('click', () => panel.classList.remove('open'));
+
+    // تبويبات
+    panel.querySelectorAll('.cb-anal-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        panel.querySelectorAll('.cb-anal-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        _analCurrentTab = tab.dataset.t;
+        _analRender();
+      });
+    });
+
+    // تصدير JSON
+    expJ?.addEventListener('click', () => {
+      const json = _analExportJSON();
+      navigator.clipboard.writeText(json)
+        .then(() => { expJ.textContent = '✅ تم النسخ'; expJ.classList.add('ok'); setTimeout(() => { expJ.textContent = '📤 تصدير JSON'; expJ.classList.remove('ok'); }, 2500); })
+        .catch(() => { expJ.textContent = '❌ خطأ'; setTimeout(() => { expJ.textContent = '📤 تصدير JSON'; }, 2000); });
+    });
+
+    // تصدير نص
+    expT?.addEventListener('click', () => {
+      const txt = _analExportText();
+      navigator.clipboard.writeText(txt)
+        .then(() => { expT.textContent = '✅ تم النسخ'; expT.classList.add('ok'); setTimeout(() => { expT.textContent = '📋 تصدير نص'; expT.classList.remove('ok'); }, 2500); })
+        .catch(() => { expT.textContent = '❌ خطأ'; setTimeout(() => { expT.textContent = '📋 تصدير نص'; }, 2000); });
+    });
+
+    // مسح سجل ETC
+    clrBtn?.addEventListener('click', () => {
+      _etcHistory.length = 0;
+      _etcOffset = 0;
+      const el = W.document.getElementById('cbEtcOffset');
+      const bd = W.document.getElementById('cbEtcBadge');
+      if (el) el.textContent = '0ms';
+      if (bd) { bd.textContent = '0 معايرة'; bd.style.background = '#6b7280'; }
+      _analRender();
+    });
+
+    // تحديث تلقائي كل 5 ثوانٍ إذا مفتوح
+    setInterval(() => {
+      if (panel.classList.contains('open')) _analRender();
+    }, 5000);
   }
 
   // ─── دوال تحديث الواجهة ─────────────────────────────────────────────
@@ -5140,6 +5334,8 @@
     if (logClose&&logFloat)  logClose.addEventListener('click',  ()=>logFloat.classList.remove('open'));
     // v12.7: init SPY panel
     _initSpyPanel();
+    // HYBRID: init Analysis panel
+    _initAnalPanel();
 
     // ✅ v10.8: زر نسخ السجل الكامل
     const logCopyBtn = W.document.getElementById('cbLogCopy');

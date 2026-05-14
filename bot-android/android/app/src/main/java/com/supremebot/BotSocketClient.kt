@@ -1,142 +1,154 @@
 package com.supremebot
 
+import android.util.Log
 import kotlinx.coroutines.*
 import okhttp3.*
 import okio.ByteString
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 class BotSocketClient(
-    private val onCommand      : (cmd: String, payload: JSONObject?) -> Unit,
-    private val onReloadScript : (script: String, version: String) -> Unit,
-    private val onLog          : (msg: String) -> Unit,
-) {
-    private val scope     = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val connected = AtomicBoolean(false)
+    private val serverUrl: String,
+    private val onCommand: (command: String, payload: JSONObject) -> Unit,
+    private val onReloadScript: (script: String, version: String?) -> Unit,
+    private val onConnected: () -> Unit,
+    private val onDisconnected: () -> Unit
+) : WebSocketListener() {
 
-    @Volatile private var wsConn: WebSocket? = null
+    companion object {
+        private const val TAG = "BotSocketClient"
+        private const val RECONNECT_DELAY_MS = 5_000L
+    }
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
+        .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
         .build()
 
-    // ── Public ────────────────────────────────────────────────────────────────
+    private var ws: WebSocket? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var running = false
 
-    fun connect() { scope.launch { connectLoop() } }
+    fun connect() {
+        running = true
+        doConnect()
+    }
+
+    private fun doConnect() {
+        val request = Request.Builder()
+            .url(serverUrl)
+            .header("User-Agent", "SupremeBot-Android/1.0")
+            .build()
+        ws = client.newWebSocket(request, this)
+    }
 
     fun disconnect() {
+        running = false
+        ws?.close(1000, "App closing")
         scope.cancel()
-        wsConn?.cancel()
     }
 
-    fun sendLog(msg: String, type: String = "info") =
-        send(JSONObject().put("type", "log").put("msg", msg).put("logType", type))
-
-    fun sendStats(stats: JSONObject) =
-        send(JSONObject().put("type", "stats").put("data", stats))
-
-    fun sendTrade(trade: JSONObject) =
-        send(JSONObject().put("type", "trade").put("data", trade))
-
-    fun sendStatus(status: String) =
-        send(JSONObject().put("type", "status").put("status", status))
-
-    fun isConnected(): Boolean = connected.get()
-
-    // ── Internal ──────────────────────────────────────────────────────────────
-
-    private fun send(obj: JSONObject) {
-        if (!connected.get()) return
-        try { wsConn?.send(obj.toString()) } catch (e: Exception) { /* ignore */ }
+    fun sendLog(type: String, message: String, extra: String? = null) {
+        send(buildJsonObject {
+            put("type", "log")
+            put("logType", type)
+            put("message", message)
+            extra?.let { put("extra", it) }
+        })
     }
 
-    private suspend fun connectLoop() {
-        var backoffMs = 2_000L
-        while (scope.isActive) {
-            val url = BotPrefs.serverWsUrl
-            if (url.isBlank() || url == "ws://localhost:3000") {
-                delay(10_000)
-                continue
-            }
-            onLog("🔌 Connecting to $url")
-            openSocket(url)
-            delay(backoffMs)
-            backoffMs = minOf(backoffMs * 2, 30_000L)
-        }
+    fun sendTrade(
+        signal: String, asset: String, amount: Double,
+        patternCase: String?, confluence: Double?,
+        isTVE: Boolean, isDouble: Boolean
+    ) {
+        send(buildJsonObject {
+            put("type", "trade")
+            put("signal", signal)
+            put("asset", asset)
+            put("amount", amount)
+            patternCase?.let { put("patternCase", it) }
+            confluence?.let { put("confluence", it) }
+            put("isTVE", isTVE)
+            put("isDouble", isDouble)
+        })
     }
 
-    private suspend fun openSocket(url: String) {
-        val latch = CompletableDeferred<Unit>()
+    fun sendStatus(tradingStatus: String, activeAsset: String?, candlePeriod: Int?,
+                   accountBalance: Double?, isDemo: Boolean) {
+        send(buildJsonObject {
+            put("type", "status")
+            put("tradingStatus", tradingStatus)
+            activeAsset?.let { put("activeAsset", it) }
+            candlePeriod?.let { put("candlePeriod", it) }
+            accountBalance?.let { put("accountBalance", it) }
+            put("isDemo", isDemo)
+        })
+    }
 
-        val listener = object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                wsConn = ws
-                connected.set(true)
-                onLog("✅ Server connected")
-                ws.send(JSONObject().put("type", "identify").put("client", "bot").toString())
-            }
+    private fun send(json: JSONObject) {
+        ws?.send(json.toString())
+    }
 
-            override fun onMessage(ws: WebSocket, text: String) {
-                handleMessage(text)
-            }
+    private fun buildJsonObject(block: JSONObject.() -> Unit): JSONObject =
+        JSONObject().apply(block)
 
-            override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                handleMessage(bytes.utf8())
-            }
+    override fun onOpen(webSocket: WebSocket, response: Response) {
+        Log.i(TAG, "WebSocket connected to $serverUrl")
+        onConnected()
+        webSocket.send(buildJsonObject {
+            put("type", "hello")
+            put("scriptVersion", BotPrefs.scriptVersion)
+        }.toString())
+    }
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                connected.set(false)
-                onLog("🔌 Disconnected ($code)")
-                latch.complete(Unit)
-            }
-
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                connected.set(false)
-                onLog("⚠️ WS error: ${t.message}")
-                latch.complete(Unit)
-            }
-        }
-
+    override fun onMessage(webSocket: WebSocket, text: String) {
         try {
-            val request = Request.Builder().url(url).build()
-            client.newWebSocket(request, listener)
-            latch.await()
-        } catch (e: Exception) {
-            onLog("⚠️ Connect error: ${e.message}")
-        } finally {
-            connected.set(false)
-            wsConn = null
-        }
-    }
-
-    private fun handleMessage(raw: String) {
-        try {
-            val msg = JSONObject(raw)
-            when (msg.optString("type")) {
-                "command" -> onCommand(
-                    msg.optString("cmd"),
-                    msg.optJSONObject("payload")
-                )
-                "reload_script" -> onReloadScript(
-                    msg.optString("script"),
-                    msg.optString("version")
-                )
-            }
-        } catch (e: Exception) { /* ignore bad json */ }
-    }
-
-    // ── Heartbeat ─────────────────────────────────────────────────────────────
-    init {
-        scope.launch {
-            while (isActive) {
-                delay(15_000)
-                if (connected.get()) {
-                    send(JSONObject().put("type", "ping").put("ts", System.currentTimeMillis()))
+            val json = JSONObject(text)
+            val type = json.optString("type")
+            when (type) {
+                "command" -> {
+                    val cmd = json.optString("command")
+                    Log.d(TAG, "Received command: $cmd")
+                    onCommand(cmd, json)
                 }
+                "reload_script" -> {
+                    val script = json.optString("script")
+                    val version = if (json.has("version")) json.optString("version") else null
+                    Log.i(TAG, "Script reload from server, version=$version")
+                    onReloadScript(script, version)
+                }
+                "ping" -> webSocket.send(buildJsonObject { put("type", "pong") }.toString())
+                else -> Log.d(TAG, "Unknown message type: $type")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Message parse error", e)
+        }
+    }
+
+    override fun onMessage(webSocket: WebSocket, bytes: ByteString) {}
+
+    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+        webSocket.close(1000, null)
+    }
+
+    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+        Log.i(TAG, "WebSocket closed: $code $reason")
+        onDisconnected()
+        scheduleReconnect()
+    }
+
+    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+        Log.e(TAG, "WebSocket failure: ${t.message}")
+        onDisconnected()
+        scheduleReconnect()
+    }
+
+    private fun scheduleReconnect() {
+        if (!running) return
+        scope.launch {
+            delay(RECONNECT_DELAY_MS)
+            if (running) {
+                Log.i(TAG, "Reconnecting...")
+                doConnect()
             }
         }
     }

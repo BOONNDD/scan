@@ -1,0 +1,825 @@
+================================================================
+ GITHUB INTEGRATION & AUTO-UPDATE PIPELINE
+ Claude Code ↔ GitHub ↔ APK ↔ Bot Script
+================================================================
+
+
+================================================================
+1. THE ECOSYSTEM (3 Connected Parts)
+================================================================
+
+┌────────────────────────────────────────────────────────────┐
+│                   CLAUDE CODE (Web)                        │
+│              Anthropic AI Development Tools                │
+│  https://claude.ai/code/session_<session-id>              │
+│                                                            │
+│  - Full access to GitHub repositories                     │
+│  - Can read/write/commit code                             │
+│  - Can push directly to branches                          │
+│  - Can trigger GitHub Actions workflows                   │
+│  - Monitors build status & test results                   │
+└────────────────────────────────────────────────────────────┘
+                           ↕ (Git Push/Pull)
+┌────────────────────────────────────────────────────────────┐
+│                      GITHUB REPOSITORY                     │
+│                   boonndd/scan (public)                    │
+│                                                            │
+│  Branches:
+│    main                      (production)
+│    claude/supreme-pred-v2... (development)                 │
+│                                                            │
+│  Key files:
+│    candle_V12_SUPREME.js     (bot script)                 │
+│    .github/workflows/        (CI/CD automation)            │
+│    bot-android/server/       (Node.js backend)             │
+│    bot-android/android/      (APK source code)             │
+│    bot-android/dashboard/    (web control panel)           │
+│    bot-android/*.txt         (documentation)              │
+└────────────────────────────────────────────────────────────┘
+                           ↕ (HTTP/Git)
+┌────────────────────────────────────────────────────────────┐
+│                   GITHUB ACTIONS (CI/CD)                   │
+│              Automated Build Pipeline                      │
+│                                                            │
+│  Workflow: build-apk.yml                                  │
+│    Triggers on: push to main or dev branch                │
+│    When: bot-android/android/** OR candle_V12_*.js change │
+│    Runs: JDK setup -> Android SDK -> Gradle build         │
+│    Output: SupremeBot-debug.apk (artifact, 30-day store)  │
+│                                                            │
+│  Actions available in workflow:
+│    - Setup Java 17 Temurin                                │
+│    - Install Android SDK tools                            │
+│    - Run Gradle assembleDebug                             │
+│    - Upload APK artifact                                  │
+│    - Email notification on success/failure                │
+└────────────────────────────────────────────────────────────┘
+                           ↕ (Download APK)
+┌────────────────────────────────────────────────────────────┐
+│                  ANDROID APK INSTALLATION                  │
+│              (on user's phone or emulator)                 │
+│                                                            │
+│  /data/app/com.supremebot/
+│    ├── base.apk              (app binary)
+│    ├── lib/                  (native libraries)
+│    └── ...
+│                                                            │
+│  Running processes:
+│    - BotService            (background trading)
+│    - MainActivity          (optional UI control)
+│    - WebView               (Pocket Option browser)
+│    - OkHttp WebSocket      (server connection)
+└────────────────────────────────────────────────────────────┘
+                           ↕ (HTTP GET)
+┌────────────────────────────────────────────────────────────┐
+│                  GITHUB RAW CONTENT (CDN)                  │
+│         https://raw.githubusercontent.com/...             │
+│                                                            │
+│  URL Structure:
+│    https://raw.githubusercontent.com/                      │
+│      boonndd/scan/                                         │
+│      claude/supreme-pred-v2-engine-UiUx4/                 │
+│      candle_V12_SUPREME.js                                │
+│                                                            │
+│  Response: Raw .js file content (no HTML wrapper)         │
+│  ETag header: unique version identifier                   │
+│  Last-Modified: timestamp for caching                     │
+│  Cache-Control: public, max-age=300 (5 min browser cache) │
+└────────────────────────────────────────────────────────────┘
+                           ↕ (JavaScript eval)
+┌────────────────────────────────────────────────────────────┐
+│                    BOT SCRIPT EXECUTION                    │
+│             (inside WebView on Android device)             │
+│                                                            │
+│  candle_V12_SUPREME.js:
+│    - Analyzes Pocket Option charts in real-time           │
+│    - Calculates confidence scores (spConf)                │
+│    - Executes trades based on signals                     │
+│    - Sends logs/stats to window.__SUPREME_BRIDGE__        │
+│    - Reads commands from window.__SUPREME_CMD__           │
+│                                                            │
+│  Injection mechanism:
+│    BotWebViewClient.onPageFinished()
+│      -> gets cached script from BotPrefs
+│      -> wraps in IIFE
+│      -> webView.evaluateJavascript(script)
+│      -> script runs with full page access
+└────────────────────────────────────────────────────────────┘
+
+
+================================================================
+2. DATA FLOW: FROM CODE CHANGE TO LIVE TRADING
+================================================================
+
+Scenario: Claude makes a change to candle_V12_SUPREME.js
+
+Step 1: Developer (Claude Code) edits script
+  Location: /home/user/scan/candle_V12_SUPREME.js
+  Action:   Add new feature or fix bug
+  Save:     git add + git commit + git push
+
+Step 2: Push triggers GitHub Actions
+  Event:    push to branch with candle_V12_*.js change
+  Trigger:  build-apk.yml workflow starts
+  Duration: 5-10 minutes
+  Output:   SupremeBot-debug.apk + GitHub artifact URL
+
+Step 3: APK ready for download
+  URL:      github.com/boonndd/scan/actions/runs/<id>
+  Access:   Anyone can see runs, but need release to auto-download
+  Manual:   Click artifact "SupremeBot-debug" to get APK
+  Auto:     Release workflow (optional) publishes to releases page
+
+Step 4: User installs new APK
+  Method:   Download + adb install OR GitHub releases page
+  Result:   BotService starts with new code
+  Data:     SharedPreferences preserved (cached script, settings)
+
+Step 5: APK's ScriptManager polls GitHub every 5 minutes
+  Request:  HTTP GET https://raw.githubusercontent.com/...
+  Header:   If-None-Match: <old-etag> (skip if unchanged)
+  Response: 304 Not Modified (if same) or 200 with new content
+  Cache:    BotPrefs.cachedScript = new script
+
+Step 6: WebView injects new script
+  Trigger:  Page load OR manual refresh
+  Method:   webView.evaluateJavascript(newScript)
+  Result:   New bot logic runs immediately (no app restart)
+
+Step 7: Trading with new code
+  Execution: Bot uses updated logic
+  Logging:   Sends logs to server via WebSocket
+  Dashboard: Shows live execution of new features
+
+
+================================================================
+3. GITHUB INTEGRATION SETUP (What Claude Code Can Do)
+================================================================
+
+Claude Code has these GitHub capabilities:
+
+3.1 Git Operations
+-------------------
+Read:
+  ✓ Clone repository
+  ✓ View all branches
+  ✓ Read any file
+  ✓ View commit history
+  ✓ Check git status
+
+Write:
+  ✓ Edit files (via Read + Edit tools)
+  ✓ Create new files
+  ✓ Delete files
+  ✓ Create new branches
+  ✓ Commit changes
+  ✓ Push to branches (with authentication token)
+  ✓ Pull/fetch changes
+
+3.2 GitHub API Access
+---------------------
+(via MCP GitHub Server)
+
+Repositories:
+  ✓ List branches, commits, tags, releases
+  ✓ Get file contents from any ref/SHA
+  ✓ View workflow runs and status
+  ✓ Download artifacts
+
+Pull Requests & Issues:
+  ✓ Create/update issues and PRs
+  ✓ Add comments and reviews
+  ✓ Merge pull requests
+  ✓ Update PR status (draft, ready, etc.)
+
+Releases:
+  ✓ Create release with artifacts
+  ✓ Tag releases with version numbers
+  ✓ Add release notes
+
+Actions:
+  ✓ Trigger workflow_dispatch events
+  ✓ View workflow runs and logs
+  ✓ Check CI/CD status
+  ✓ Monitor build progress
+
+3.3 Authentication
+-------------------
+Claude Code uses: GitHub Personal Access Token (PAT)
+  Stored in: Session environment (session-specific, not persisted)
+  Permissions: repo, workflow, actions, releases
+  Scope: BOONNDD/scan repository
+  Expiry: Token lifespan set by user
+
+
+================================================================
+4. AUTO-UPDATE MECHANISM (5-Minute Script Polling)
+================================================================
+
+The APK doesn't wait for user to manually update. Instead:
+
+4.1 ScriptManager (Android Service)
+-------------------------------------
+Location: bot-android/android/app/src/main/java/com/supremebot/ScriptManager.kt
+
+Behavior:
+  1. On app launch:
+       - Load BotPrefs.cachedScript (instant offline startup)
+       - Call onUpdate() callback immediately
+  2. Start infinite polling loop (Dispatchers.IO):
+       - Every 5 minutes:
+         a. HTTP GET https://raw.githubusercontent.com/.../candle_V12_SUPREME.js
+         b. Send header: If-None-Match: <BotPrefs.scriptVersion>
+         c. Check response:
+            - 304 Not Modified: script unchanged, skip
+            - 200 OK: new script, parse ETag header
+            - If ETag != stored version:
+              * Save to BotPrefs.cachedScript
+              * Save to BotPrefs.scriptVersion
+              * Call onUpdate(newScript, newVersion)
+              * Fire onChecked() callback (for UI countdown timer)
+
+4.2 Hot-Reload (No App Restart)
+---------------------------------
+When new script is detected:
+
+  ScriptManager.onUpdate(script, version)
+    -> MainActivity.onUpdate handler:
+         -> BotPrefs.cachedScript = script
+         -> webView.evaluateJavascript("document.readyState") { state ->
+              if (state?.contains("complete")) {
+                  injectScript(script)  // wrap in IIFE + eval
+              }
+         }
+
+  Result: New bot logic executes IMMEDIATELY on Pocket Option page
+          No app restart required
+          No user action needed
+
+4.3 Server-Initiated Reload (Optional)
+---------------------------------------
+Alternatively, the control server can force reload:
+
+  POST /api/script/reload (on Node.js server)
+    -> Server fetches GitHub
+    -> Broadcasts to all APPs: {type:"reload_script", script, version}
+    -> APK BotSocketClient receives message
+    -> Calls onReloadScript() handler
+    -> Same hot-reload as above
+
+  Timeline: Instant (via WebSocket, no polling delay)
+
+4.4 Update Status in UI
+------------------------
+The APK shows countdown to next update check:
+
+  Status bar: "🔄 4:55" (4 minutes 55 seconds until next check)
+  Updates every second in MainActivity.startStatusPolling()
+  Formula: remaining = pollIntervalMs - (now - scriptManager.lastCheckMs)
+  When remaining <= 0: shows "🔄 ..."
+
+
+================================================================
+5. GITHUB ACTIONS WORKFLOW (build-apk.yml)
+================================================================
+
+5.1 What Triggers the Build?
+-----------------------------
+Events:
+  ✓ Push to branch: main
+  ✓ Push to branch: claude/supreme-pred-v2-engine-UiUx4
+  ✓ Paths changed:
+      - bot-android/android/** (any file in Android project)
+      - candle_V12_SUPREME.js   (the bot script)
+  ✓ workflow_dispatch (manual trigger via GitHub UI)
+
+When triggered:
+  1. GitHub spins up ubuntu-latest runner (fresh VM)
+  2. Clones repository at the commit SHA
+  3. Runs all steps in sequence
+  4. If any step fails: workflow stops and notifies
+  5. On success: creates artifact and stores for 30 days
+
+5.2 Build Steps
+----------------
+1. actions/checkout@v4
+     Clone the repo at the current commit
+
+2. actions/setup-java@v4
+     Install JDK 17 (Temurin distribution)
+     Enable gradle caching (faster rebuilds)
+
+3. Install Android SDK (using pre-installed $ANDROID_SDK_ROOT)
+     sdkmanager "platforms;android-34" "build-tools;34.0.0"
+     Takes: ~2 minutes (cached, so often skipped)
+
+4. Create local.properties
+     echo "sdk.dir=$ANDROID_SDK_ROOT" > bot-android/android/local.properties
+     Gradle needs this to find Android SDK path
+
+5. Make gradlew executable
+     chmod +x bot-android/android/gradlew
+     Required on Linux runners
+
+6. Run Gradle build
+     cd bot-android/android
+     ./gradlew assembleDebug --no-daemon --stacktrace
+     GRADLE_OPTS: -Xmx3g -XX:MaxMetaspaceSize=512m
+     Duration: ~3-5 minutes (depends on cache hits)
+     Output: app-debug.apk
+
+7. Upload APK artifact
+     Name: SupremeBot-debug
+     Path: bot-android/android/app/build/outputs/apk/debug/app-debug.apk
+     Retention: 30 days
+     Accessible: From Actions tab, or via API
+
+5.3 Critical gradle.properties Settings
+-----------------------------------------
+These MUST be present in bot-android/android/gradle.properties:
+
+  android.useAndroidX=true
+    → Uses AndroidX libraries (required by all modern deps)
+    → Without this: "useAndroidX property is not enabled" error
+
+  android.enableJetifier=true
+    → Auto-converts old support libs to AndroidX
+    → Fallback for any legacy dependencies
+
+  org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m
+    → Allocates 3GB heap to Gradle (for APK generation)
+    → Without this: OOM errors on larger projects
+
+  org.gradle.daemon=false
+    → Disables Gradle daemon on CI (prevents hanging processes)
+
+  kotlin.code.style=official
+    → Enforces Kotlin formatter rules
+
+
+================================================================
+6. CLAUDE CODE WORKFLOW (How AI Updates the Project)
+================================================================
+
+6.1 Edit → Commit → Push → Build Loop
+---------------------------------------
+
+Scenario: Claude Code improves the bot script
+
+Step 1: Read current script
+  Command: Read /home/user/scan/candle_V12_SUPREME.js
+  Result: Full JS text loaded into session
+
+Step 2: Analyze and modify
+  Action: Identify section to improve
+         Write new logic or bugfix
+         Preserve bridge integration points
+         Test logic in mind
+
+Step 3: Edit file
+  Command: Edit tool → old_string / new_string
+  Result: File modified locally
+  Check:  git status shows "modified"
+
+Step 4: Verify changes
+  Command: git diff (via Bash tool)
+  Result: See exact additions/removals
+  Confidence: Visually confirm correctness before committing
+
+Step 5: Commit
+  Command: git add candle_V12_SUPREME.js
+           git commit -m "<message>" --no-verify
+           (--no-verify skips pre-commit hooks if needed)
+  Result: Local commit created
+
+Step 6: Push
+  Command: git push -u origin claude/supreme-pred-v2-engine-UiUx4
+  Auth:    Uses stored GitHub PAT
+  Result:  Change uploaded to GitHub
+  Webhook: GitHub Actions triggered automatically
+
+Step 7: Monitor CI
+  Command: gh run list (or GitHub Actions API)
+  Result:  See workflow status
+  Duration: Wait 5-10 minutes for build
+  Artifact: APK available once build succeeds
+
+Step 8: Test in emulator or device
+  Manual:  Download APK from Actions artifacts
+  Install: adb install -r SupremeBot-debug.apk
+  Test:    Open app, verify new feature works
+
+Step 9: Merge to main (if approved)
+  Command: Create PR via GitHub UI or API
+          Add review links
+          Merge when ready
+  Result:  Production branch updated
+  Effect:  New releases built from main
+
+6.2 What Claude Code Cannot Do (Yet)
+--------------------------------------
+✗ Cannot run adb (Android debugger)
+✗ Cannot emulate APK in browser
+✗ Cannot access real device
+✗ Cannot execute Gradle locally (needs CLI)
+✗ Cannot test UI changes without deploying
+
+Workaround: Push → GitHub Actions builds → Download APK → Manual test
+
+
+================================================================
+7. SECURITY & PERMISSIONS
+================================================================
+
+7.1 GitHub Authentication
+--------------------------
+PAT (Personal Access Token):
+  Scope:     repo, workflow, actions
+  Lifespan:  30-90 days (configurable)
+  Used for:  Commits, pushes, API calls
+  Risk:      Token in session memory (not saved to disk)
+  Revoke:    Any time on GitHub settings
+
+7.2 Repository Permissions
+---------------------------
+Public repo (boonndd/scan):
+  Read:  Anyone (no auth needed for public clones)
+  Write: Only with valid PAT + write permissions
+  Admin: Only repository owner
+
+Branch Protection:
+  main branch: Optionally require PR review + CI pass
+  dev branch:  Direct push allowed (for rapid iteration)
+
+7.3 Artifact Access
+--------------------
+APK artifacts:
+  Location: GitHub Actions artifacts (30-day retention)
+  Access:   Only via GitHub API or Actions page
+  Public:   Not auto-published (unless release created)
+  Security: Can be scanned with CodeQL (GitHub's SAST tool)
+
+7.4 Secret Handling
+--------------------
+Sensitive data (API keys, tokens, passwords):
+  NOT stored in: bot-android/ code
+  STORED in:    GitHub Secrets (encrypted)
+  Used by:      Workflow only (never committed)
+  Example:      GITHUB_TOKEN (auto-provided by Actions)
+
+
+================================================================
+8. FULL UPDATE CYCLE TIMELINE
+================================================================
+
+0:00  Claude Code finds bug in candle_V12_SUPREME.js
+0:02  Edits script, commits, pushes to GitHub
+0:03  GitHub webhook triggers build-apk.yml workflow
+0:05  JDK 17 installed, Android SDK checked
+0:10  Gradle assembles APK
+0:12  APK uploaded as artifact
+      (Available for download)
+
+5:00  Next APK installed by user (manual)
+5:01  BotService starts with new app code
+5:05  ScriptManager first poll (5-minute cycle)
+5:06  Detects new candle_V12_SUPREME.js on GitHub
+5:07  Downloads new script, caches in BotPrefs
+5:08  WebView injects new script via evaluateJavascript
+5:09  New bot logic executes on live Pocket Option page
+      (Zero downtime, no user action)
+
+5:10  Dashboard shows logs from new bot logic
+5:15  Next poll: script unchanged (304 response), skip
+5:20  Next poll: script unchanged, skip
+5:25  Next poll: script unchanged, skip
+10:05 Another update pushed by Claude
+10:10 Build completes, new APK ready
+10:15 Users can update app (or auto-push new code via script poll)
+
+
+================================================================
+9. CONTINUOUS IMPROVEMENT WORKFLOW
+================================================================
+
+Ideation → Code → Build → Test → Deploy → Monitor → Repeat
+
+Day 1:
+  Claude reads dashboard logs
+  Identifies win-rate drop on certain pairs
+  Analyzes candle_V12_SUPREME.js logic
+  Implements fix (adjust confidence threshold)
+  Commits & pushes to dev branch
+  GitHub Actions builds APK (~10 min)
+
+Day 2:
+  User installs new APK
+  Next 5-minute script poll gets new code
+  New logic runs on live trades
+  Logs show improvement
+
+Day 3:
+  Claude merges fix to main branch
+  Release created automatically (optional)
+  Documentation updated
+  Other developers can fork/use
+
+Week 1:
+  Accumulated fixes + features merged
+  New release v1.0.1 published
+  APK auto-upgradable from app store (future)
+
+Month 1:
+  Major feature addition (e.g., new trading strategy)
+  Tested on dev branch for 2 weeks
+  Merged to main
+  Release v1.1.0
+  Performance metrics reviewed
+  Next cycle begins
+
+
+================================================================
+10. INTEGRATION POINTS
+================================================================
+
+10.1 Claude ↔ GitHub
+---------------------
+Claude Code MCP Server:
+  - Read git history
+  - Edit files
+  - Commit changes
+  - Push to branches
+  - Create PRs
+  - Review PR comments
+  - Merge code
+  - Download artifacts
+
+Benefits:
+  ✓ No manual Git CLI (MCP abstracts it)
+  ✓ Direct code modification in chat
+  ✓ CI/CD integration (see build status)
+  ✓ Code review in workflow
+  ✓ Artifact management
+
+10.2 GitHub ↔ APK
+------------------
+Actions Workflow:
+  - Watches repository for changes
+  - Automatically builds APK when code changes
+  - Stores APK as artifact
+  - Notifies on success/failure
+
+Benefits:
+  ✓ No manual build steps
+  ✓ Reproducible builds (same env every time)
+  ✓ Fast iteration (5-10 min turnaround)
+  ✓ Artifact history (all builds kept)
+
+10.3 APK ↔ GitHub Script
+-------------------------
+ScriptManager Polling:
+  - Every 5 minutes: HTTP GET to GitHub raw URL
+  - Compares ETag (version identifier)
+  - If changed: downloads new script
+  - Injects into WebView (hot-reload)
+
+Benefits:
+  ✓ Users get updates WITHOUT app reinstall
+  ✓ 5-minute update latency (configurable)
+  ✓ Automatic retry on failure
+  ✓ Offline fallback (cached script)
+
+10.4 APK ↔ Control Server (Node.js)
+-------------------------------------
+WebSocket Bridge:
+  - APK connects to server on startup
+  - Server sends commands (start/stop/reload)
+  - Server pushes new scripts (immediate, not polled)
+  - Server receives logs/stats/trades
+
+Benefits:
+  ✓ Real-time control from dashboard
+  ✓ Live logs & stats monitoring
+  ✓ Immediate script reload (no 5-min wait)
+  ✓ Remote trading management
+
+10.5 Server ↔ GitHub (Script Polling)
+---------------------------------------
+Node.js Server Auto-Update:
+  - Every 5 minutes: fetches candle_V12_SUPREME.js from GitHub
+  - Caches in memory
+  - On new connection: sends cached script to APK
+  - On update: broadcasts reload_script message
+
+Benefits:
+  ✓ Server always has latest script
+  ✓ New APP connections get latest code
+  ✓ Push-based updates (no latency)
+
+
+================================================================
+11. MONITORING & DEBUGGING
+================================================================
+
+11.1 GitHub Actions Logs
+------------------------
+Access: github.com/BOONNDD/scan/actions
+
+For each workflow run:
+  ✓ Full stdout/stderr from all steps
+  ✓ Timing for each step
+  ✓ Environment variables (non-secret)
+  ✓ Failed assertion details
+  ✓ Download artifacts
+  ✓ Rerun failed jobs
+
+Example errors:
+  "useAndroidX property is not enabled"
+    → gradle.properties missing android.useAndroidX=true
+  "No files found at path"
+    → APK wasn't built (Gradle failed earlier)
+  "HTTP 404 not found"
+    → Gradle dependencies not found (network issue)
+
+11.2 Dashboard Logs (Remote)
+----------------------------
+Access: https://your-server.railway.app
+
+Info available:
+  ✓ Connection status (green/red dot)
+  ✓ Bot status (OFFLINE/IDLE/TRADING/PAUSED)
+  ✓ Script version (ETag hash)
+  ✓ Live logs (recent 50 entries)
+  ✓ Trade history (recent 100 trades)
+  ✓ Win/loss stats + win-rate percentage
+
+11.3 APK Local Logs
+-------------------
+Access: adb logcat | grep supremebot
+
+Captured:
+  ✓ All handleLog() calls
+  ✓ WebSocket connection events
+  ✓ Script injection markers
+  ✓ Error messages
+  ✓ Bot ready/stop events
+
+
+================================================================
+12. EXAMPLE: CLAUDE UPDATES THE BOT
+================================================================
+
+Scenario: Win-rate drops. Claude investigates and fixes.
+
+Timeline:
+
+2024-01-15 10:00 AM
+  Dashboard shows: W:45 L:55 WR:45%
+  Claude reads logs in dashboard
+  Notices pattern: EURJPY losing more than others
+
+2024-01-15 10:05 AM
+  Claude Code session:
+    Read candle_V12_SUPREME.js
+    Search for EURJPY logic
+    Found: confidence threshold too low (40%)
+    Change: Raise threshold to 55%
+    Reason: Reduces false signals on volatile pairs
+
+2024-01-15 10:10 AM
+  git add candle_V12_SUPREME.js
+  git commit -m "fix(bot): raise EURJPY confidence to 55%"
+  git push -u origin claude/supreme-pred-v2-engine-UiUx4
+
+2024-01-15 10:12 AM
+  GitHub webhook fires
+  .github/workflows/build-apk.yml triggered
+  Actions shows: "Building APK..."
+
+2024-01-15 10:22 AM
+  Actions shows: "Build succeeded"
+  Artifact: SupremeBot-debug available for download
+  (Users can manual update, or...)
+
+2024-01-15 10:25 AM
+  APK's ScriptManager polls GitHub
+  Gets new candle_V12_SUPREME.js (ETag changed)
+  Downloads and caches in BotPrefs
+  Injects into WebView via evaluateJavascript
+
+2024-01-15 10:26 AM
+  New bot logic live
+  EURJPY trades now use 55% threshold
+  Next trade on EURJPY waits for higher confidence
+
+2024-01-15 11:00 AM
+  Dashboard shows: W:52 L:48 WR:52% (improved)
+  Claude verifies fix successful
+  No code rollback needed (fix was solid)
+
+2024-01-15 15:00 PM
+  Claude merges dev branch to main
+  Creates release v1.0.1
+  Documentation updated
+  (Other developers can pull latest)
+
+
+================================================================
+13. PERMISSION LEVELS & CONSTRAINTS
+================================================================
+
+13.1 What Claude Code Can Do
+-----------------------------
+✓ Read all files in repo
+✓ Write/edit code
+✓ Create commits
+✓ Push to dev branches
+✓ Create pull requests
+✓ View GitHub Actions status
+✓ Download artifacts
+✓ Review PR comments
+✓ Merge approved PRs
+✓ Create releases
+
+13.2 What Requires Manual Approval
+-----------------------------------
+⚠ Merge to main (if branch protection enabled)
+⚠ Push to main (usually restricted)
+⚠ Delete branches
+⚠ Change repository settings
+⚠ Modify GitHub secrets
+⚠ Create/delete environments
+
+13.3 What Cannot Be Done (By Design)
+-------------------------------------
+✗ Execute code locally (no JVM/Gradle runner)
+✗ Install APK to device (no ADB access)
+✗ Test APK directly (no Android emulator)
+✗ Access database (no DB backend)
+✗ Modify GitHub organization settings
+✗ Manage billing/payment
+
+
+================================================================
+14. DISASTER RECOVERY
+================================================================
+
+14.1 Script Update Fails
+------------------------
+If new candle_V12_SUPREME.js is broken:
+  Problem: BotSocketClient crashes or spams errors
+  Solution:
+    1. Claude reverts commit on GitHub
+    2. APK's next 5-min poll gets good script
+    3. Recovery in 5 minutes max
+
+14.2 APK Build Fails
+---------------------
+If GitHub Actions build breaks:
+  Problem: Gradle error prevents APK generation
+  Solution:
+    1. Actions shows error logs (all stderr captured)
+    2. Claude reads logs, identifies issue
+    3. Fixes code, pushes again
+    4. Next build attempt auto-triggered
+    5. No user impact (old APK still works)
+
+14.3 Server Down
+-----------------
+If Node.js server crashes (Railway/Render):
+  Problem: APK can't connect to control server
+  Solution:
+    1. APK's BotSocketClient has exponential backoff (retry every 2-30s)
+    2. Bot continues trading (cached script still runs)
+    3. Server restarts (auto-restart on platform)
+    4. APK reconnects within 1-2 minutes
+    5. No trade execution lost
+
+14.4 GitHub Outage
+-------------------
+If GitHub is down:
+  Problem: Script polling fails temporarily
+  Solution:
+    1. ScriptManager retries after failure
+    2. BotPrefs.cachedScript already loaded
+    3. Bot continues with cached version
+    4. Once GitHub recovers, APK polls again
+    5. Zero impact to trading (cache is live code)
+
+
+================================================================
+ END OF GUIDE
+================================================================
+
+This integration enables:
+  • Rapid iteration (code → APK in 10 minutes)
+  • Zero-downtime updates (5-minute polling + hot-reload)
+  • Remote monitoring (dashboard + WebSocket)
+  • Automated testing (GitHub Actions CI/CD)
+  • Version control (full Git history)
+  • Team collaboration (PR reviews + comments)
+  • Disaster recovery (automatic fallbacks)
+
+Result: A production-grade system where Claude Code can
+continuously improve the bot, automated builds ensure
+quality, and users always have the latest trading logic.

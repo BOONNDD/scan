@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Supreme Bot</string>
+    <string name="app_name">SupremeBot</string>
+    <string name="channel_name">Supreme Bot Service</string>
+    <string name="channel_desc">Bot trading service running in background</string>
 </resources>

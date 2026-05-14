@@ -3,9 +3,12 @@ name: Build Supreme Bot APK
 on:
   push:
     branches:
+      - main
       - claude/supreme-pred-v2-engine-UiUx4
     paths:
       - 'bot-android/android/**'
+      - 'candle_V12_SUPREME.js'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 jobs:
@@ -23,44 +26,63 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Show pre-installed Android SDK info
-        run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls $ANDROID_SDK_ROOT/platforms/ 2>/dev/null || echo "No platforms dir"
-          ls $ANDROID_SDK_ROOT/build-tools/ 2>/dev/null || echo "No build-tools dir"
-
-      - name: Install required Android SDK components
+      - name: Install Android SDK components
         run: |
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
-            "platform-tools" \
             "platforms;android-34" \
-            "build-tools;34.0.0" \
-            --sdk_root=$ANDROID_SDK_ROOT 2>/dev/null || true
+            "build-tools;34.0.0" 2>/dev/null || true
 
       - name: Create local.properties
-        run: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > bot-android/android/local.properties
-          cat bot-android/android/local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > bot-android/android/local.properties
 
       - name: Grant execute permission for gradlew
         run: chmod +x bot-android/android/gradlew
 
       - name: Build Debug APK
         working-directory: bot-android/android
-        run: |
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            2>&1 | tail -100
+        run: ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
         env:
           GRADLE_OPTS: "-Xmx3g -XX:MaxMetaspaceSize=512m"
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+
+      - name: Surface actual error on failure
+        if: failure()
+        working-directory: bot-android/android
+        run: |
+          if [ ! -f build.log ]; then
+            echo "build.log not found — Gradle build never started"
+            exit 0
+          fi
+          echo "==================== FIRST 80 LINES ===================="
+          head -n 80 build.log
+          echo ""
+          echo "==================== KOTLIN / AAPT ERRORS ===================="
+          grep -n -E "^e:|^error:|error: resource|ERROR:" build.log || echo "(no error lines found)"
+          echo ""
+          echo "==================== TASK FAILURES ===================="
+          grep -n "FAILED\|What went wrong\|Caused by:" build.log | head -40 || echo "(no task failures)"
+          echo ""
+          echo "==================== LAST 150 LINES ===================="
+          tail -n 150 build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: bot-android/android/build.log
+          retention-days: 7
+
+      - name: Show build output directory
+        if: always()
+        run: |
+          echo "=== Build output ==="
+          find bot-android/android/app/build -name "*.apk" 2>/dev/null || echo "No APK found"
+          echo "=== Build dir exists? ==="
+          ls bot-android/android/app/build/outputs/ 2>/dev/null || echo "outputs dir missing"
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
         if: success()
+        uses: actions/upload-artifact@v4
         with:
           name: SupremeBot-debug
           path: bot-android/android/app/build/outputs/apk/debug/app-debug.apk

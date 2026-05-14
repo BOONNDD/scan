@@ -1,174 +1,111 @@
 package com.supremebot
 
+import android.graphics.Bitmap
+import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
 
-/**
- * Custom WebViewClient that:
- * 1. Injects the bridge script on every Pocket Option page
- * 2. Injects the main bot script after the bridge
- * 3. Intercepts page navigation to stay on Pocket Option
- */
 class BotWebViewClient(
-    private val getScript : () -> String?,
-    private val onLog     : (String) -> Unit,
+    private val onPageReady: () -> Unit,
+    private val getExtensions: ((String) -> List<Pair<String, String>>)? = null,
+    val onUrlChanged: ((String) -> Unit)? = null
 ) : WebViewClient() {
 
     companion object {
-        private const val TARGET_HOST = "pocketoption.com"
-        private const val LOGIN_URL   = "https://pocketoption.com/en/login/"
-        private const val TRADE_URL   = "https://pocketoption.com/en/cabinet/demo-quick-high-low/"
+        private const val TAG = "BotWebViewClient"
     }
 
-    // Called once the DOM is ready
-    override fun onPageFinished(view: WebView, url: String) {
-        super.onPageFinished(view, url)
+    var cachedScript: String? = null
+    var scriptVersion: String? = null
 
-        if (!url.contains(TARGET_HOST)) return
-
-        onLog("📄 Page: $url")
-
-        // Step 1: inject the bridge (defines window.Android + window.__SUPREME_BRIDGE__)
-        val bridge = buildBridgeScript()
-        view.evaluateJavascript(bridge, null)
-
-        // Step 2: inject the main bot script (if available)
-        val script = getScript()
-        if (!script.isNullOrEmpty()) {
-            // Wrap in IIFE and remove @grant/@match Tampermonkey headers if present
-            val cleaned = cleanScript(script)
-            view.evaluateJavascript(cleaned) { result ->
-                onLog("🤖 Bot script injected: $result")
-            }
-        } else {
-            onLog("⚠️ No script cached yet, waiting for download…")
-        }
-    }
-
-    // ── URL filtering ─────────────────────────────────────────────────────────
-
-    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-        val url = request.url.toString()
-        // Block navigating away from Pocket Option
-        if (!url.contains(TARGET_HOST)) {
-            onLog("🚫 Blocked navigation to: $url")
-            return true
-        }
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         return false
     }
 
-    // ── Bridge script ─────────────────────────────────────────────────────────
+    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+        super.onPageStarted(view, url, favicon)
+        url?.let { onUrlChanged?.invoke(it) }
+        Log.d(TAG, "Page started: $url")
+    }
 
-    private fun buildBridgeScript(): String = """
-        (function() {
-          if (window.__SUPREME_BRIDGE_LOADED__) return;
-          window.__SUPREME_BRIDGE_LOADED__ = true;
+    override fun onPageFinished(view: WebView?, url: String?) {
+        super.onPageFinished(view, url)
+        Log.i(TAG, "Page loaded: $url")
+        url?.let { onUrlChanged?.invoke(it) }
 
-          /* ── Android → JS callbacks ──────────────────────────── */
-          window.__SUPREME_BRIDGE__ = {
-            _ws      : null,
-            _serverUrl: null,
-            _ready   : false,
+        val script = cachedScript
+        if (script != null) {
+            injectScript(view, script)
+            onPageReady()
+        }
 
-            connect: function() {
-              try {
-                var url = window.Android && window.Android.getServerUrl
-                  ? window.Android.getServerUrl()
-                  : null;
-                if (!url || url === 'ws://localhost:3000') return; // no real server
-                this._serverUrl = url;
-                var self = this;
-                var ws   = new WebSocket(url);
-                this._ws = ws;
+        url?.let { pageUrl ->
+            getExtensions?.invoke(pageUrl)?.forEach { (extName, extScript) ->
+                val wrapped = """
+                    (function() {
+                        try { $extScript }
+                        catch(e) { console.error('[Ext:${extName}] ' + e.message); }
+                    })();
+                """.trimIndent()
+                view?.evaluateJavascript(wrapped, null)
+            }
+        }
+    }
 
-                ws.onopen = function() {
-                  ws.send(JSON.stringify({ type:'identify', client:'bot' }));
-                  self._ready = true;
+    fun injectScript(view: WebView?, script: String) {
+        view ?: return
+        val version = scriptVersion ?: "unknown"
+
+        setupBridgeInterface(view)
+
+        val wrapped = """
+            (function() {
+                try {
+                    $script
+                } catch(e) {
+                    console.error('[V12_SUPREME] Injection error: ' + e.message);
+                    if (window.__SUPREME_BRIDGE__) {
+                        window.__SUPREME_BRIDGE__.onLog('error', 'Injection error: ' + e.message, '');
+                    }
+                }
+            })();
+        """.trimIndent()
+
+        view.evaluateJavascript(wrapped) { result ->
+            Log.d(TAG, "Script injected (v$version), result=$result")
+        }
+    }
+
+    private fun setupBridgeInterface(view: WebView) {
+        val bridgeJs = """
+            (function() {
+                window.__SUPREME_CMD__ = window.__SUPREME_CMD__ || [];
+                window.__SUPREME_BRIDGE__ = {
+                    onLog: function(type, message, extra) {
+                        Android.onLog(type, message, extra || '');
+                    },
+                    onTrade: function(dataJson) {
+                        Android.onTrade(dataJson);
+                    },
+                    onStatus: function(dataJson) {
+                        Android.onStatus(dataJson);
+                    }
                 };
-                ws.onmessage = function(e) {
-                  try {
-                    var m = JSON.parse(e.data);
-                    if (m.type === 'command')       self._handleCmd(m.cmd, m.payload);
-                    if (m.type === 'reload_script') self._reloadScript(m.script, m.version);
-                    if (m.type === 'pong')          {}
-                  } catch(_) {}
-                };
-                ws.onerror = ws.onclose = function() {
-                  self._ready = false;
-                  setTimeout(function(){ self.connect(); }, 5000);
-                };
-              } catch(e) {}
-            },
+            })();
+        """.trimIndent()
+        view.evaluateJavascript(bridgeJs, null)
+    }
 
-            log: function(msg, type) {
-              /* Forward to Android native interface */
-              try { window.Android && window.Android.log(JSON.stringify({msg:msg,type:type||'info'})); } catch(_){}
-              /* Also send over WebSocket if connected */
-              this._send({ type:'log', msg:msg, logType:type||'info', ts:Date.now() });
-            },
-
-            stats: function(data) {
-              try { window.Android && window.Android.stats(JSON.stringify(data)); } catch(_){}
-              this._send({ type:'stats', data:data });
-            },
-
-            trade: function(data) {
-              try { window.Android && window.Android.trade(JSON.stringify(data)); } catch(_){}
-              this._send({ type:'trade', data:data });
-            },
-
-            status: function(s) {
-              try { window.Android && window.Android.status(s); } catch(_){}
-              this._send({ type:'status', status:s });
-            },
-
-            _send: function(obj) {
-              if (this._ws && this._ws.readyState === 1) {
-                try { this._ws.send(JSON.stringify(obj)); } catch(_) {}
-              }
-            },
-
-            _handleCmd: function(cmd, payload) {
-              switch(cmd) {
-                case 'start':       window.__SUPREME_CMD__ = 'start';       break;
-                case 'stop':        window.__SUPREME_CMD__ = 'stop';        break;
-                case 'pause':       window.__SUPREME_CMD__ = 'pause';       break;
-                case 'set_amount':
-                  if (payload && payload.amount) window.__SUPREME_AMOUNT__ = payload.amount;
-                  break;
-              }
-            },
-
-            _reloadScript: function(script, version) {
-              if (!script) return;
-              try {
-                // eslint-disable-next-line no-eval
-                eval(script);
-                window.__SUPREME_BRIDGE__.log('🔄 Hot-reload OK: ' + (version||'').slice(0,12), 'system');
-              } catch(e) {
-                window.__SUPREME_BRIDGE__.log('❌ Hot-reload failed: ' + e.message, 'error');
-              }
-            },
-          };
-
-          /* ── Auto-connect bridge ───────────────────────────────── */
-          window.__SUPREME_BRIDGE__.connect();
-
-          /* ── Heartbeat ping every 10s ─────────────────────────── */
-          setInterval(function() {
-            window.__SUPREME_BRIDGE__._send({ type:'ping', ts:Date.now() });
-          }, 10000);
-
-        })();
-    """.trimIndent()
-
-    // ── Script cleaner ────────────────────────────────────────────────────────
-
-    private fun cleanScript(raw: String): String {
-        // Remove Tampermonkey metadata block if present
-        val cleaned = raw.replace(Regex("""// ==UserScript==[\s\S]*?// ==/UserScript=="""), "")
-        // Wrap in IIFE to avoid polluting global scope accidentally
-        return "(function(){\n$cleaned\n})();"
+    fun sendCommand(view: WebView, command: String, extra: JSONObject? = null) {
+        val cmd = extra?.put("command", command) ?: JSONObject().put("command", command)
+        val js = """
+            (function() {
+                if (!window.__SUPREME_CMD__) window.__SUPREME_CMD__ = [];
+                window.__SUPREME_CMD__.push(${cmd});
+            })();
+        """.trimIndent()
+        view.evaluateJavascript(js, null)
     }
 }
